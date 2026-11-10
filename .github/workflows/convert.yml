@@ -13,6 +13,10 @@ on:
       name:
         description: "اسم الملف الناتج (انجليزي بدون مسافات)"
         default: converted
+      release_tag:
+        description: "اسم الـ Release اللي رفعت فيه الملفات الكبيرة (اختياري)"
+        required: false
+        default: ""
       url:
         description: "رابط تحميل مباشر للملفات (اختياري)"
         required: false
@@ -39,8 +43,16 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           URL: ${{ inputs.url }}
+          TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p input
+          if [ -n "$TAG" ]; then
+            gh release download "$TAG" --repo "${{ github.repository }}" --dir input --clobber
+            for z in input/*.zip; do
+              [ -f "$z" ] && unzip -q -o "$z" -d input && rm -f "$z"
+            done
+          fi
           if [ -n "$URL" ]; then
             curl -L --fail -o /tmp/download "$URL"
             if unzip -tq /tmp/download >/dev/null 2>&1; then
