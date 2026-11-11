@@ -1,5 +1,3 @@
-mkdir -p /home/claude/v2 && cd /home/claude/v2 && cat > auto_convert.py <<'PYEOF'
-#!/usr/bin/env python3
 """GTA V PC -> PS4 auto driver  (v2.0)
 
 Detects what the uploaded mod is and drives the matching option of the
