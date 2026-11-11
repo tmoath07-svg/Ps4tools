@@ -1,99 +1,314 @@
-name: Convert GTA V mod to PS4
+mkdir -p /home/claude/v2 && cd /home/claude/v2 && cat > auto_convert.py <<'PYEOF'
+#!/usr/bin/env python3
+"""GTA V PC -> PS4 auto driver  (v2.0)
 
-on:
-  workflow_dispatch:
-    inputs:
-      name:
-        description: "اسم المجلد (انجليزي بدون مسافات)"
-        default: converted
-      release_tag:
-        description: "اسم الـ Release (Tag)"
-        required: false
-        default: ""
-      mode:
-        description: "النوع (خله auto)"
-        type: choice
-        default: auto
-        options:
-          - auto
-          - cars
-          - map
-          - vehicle
-          - character
-          - files
-      url:
-        description: "رابط تحميل مباشر (اختياري)"
-        required: false
-        default: ""
+Detects what the uploaded mod is and drives the matching option of the
+7N-RL tool: cars dlc.rpf, map dlc.rpf, loose cars (yft/ytd), 5-car pack,
+characters, FiveM map, or normal file conversion.
+Result layout:  <out>/<NAME>/dlc.rpf   (or <out>/<NAME>/<label>/dlc.rpf)
+"""
+import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile, time
+from pathlib import Path
 
-jobs:
-  convert:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
+VERSION = '2.0'
+ROOT = Path(__file__).resolve().parent
 
-      - name: Install tools
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wine wine64 xvfb unzip python3
-          sudo apt-get install -y p7zip-full unrar || true
-          sudo apt-get install -y p7zip-rar || true
-          python3 -m pip install pycryptodome watchdog
+ap = argparse.ArgumentParser()
+ap.add_argument('input')
+ap.add_argument('name')
+ap.add_argument('mode', nargs='?', default='auto')
+ap.add_argument('out', nargs='?', default='../out')
+ap.add_argument('--merge', default='false')
+args = ap.parse_args()
 
-      - name: Unpack tool
-        run: |
-          test -f auto_convert.py || { echo "auto_convert.py is missing from the repo root"; exit 1; }
-          unzip -q ps4tool.zip
-          cp auto_convert.py ps4tool/auto_convert.py
-          mkdir -p ps4tool/file_input ps4tool/Finish
+SRC = Path(args.input).resolve()
+OUT = Path(args.out).resolve()
+NAME = re.sub(r'[^A-Za-z0-9_-]', '_', args.name).strip('_') or 'converted'
+NAME_ID = NAME.replace('-', '_')          # tool wants A-Z a-z 0-9 _ only
+MODE = (args.mode or 'auto').strip().lower()
+MERGE = str(args.merge).strip().lower() in ('1', 'true', 'yes', 'y')
+DRY = os.environ.get('DRY_RUN') == '1'
+TIMEOUT = int(os.environ.get('TOOL_TIMEOUT', '5400'))
 
-      - name: Gather input files
-        env:
-          URL: ${{ inputs.url }}
-          TAG: ${{ inputs.release_tag }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p input
-          if [ -n "$TAG" ]; then
-            gh release download "$TAG" --repo "${{ github.repository }}" --dir input --clobber
-          fi
-          if [ -n "$URL" ]; then
-            curl -L --fail -o /tmp/download "$URL"
-            if 7z t /tmp/download >/dev/null 2>&1; then
-              mv /tmp/download input/download.7z
-            else
-              cp /tmp/download input/dlc.rpf
-            fi
-          fi
-          for pass in 1 2; do
-            for a in input/*.zip input/*.rar input/*.7z; do
-              [ -f "$a" ] || continue
-              case "$a" in
-                *.zip) unzip -q -o "$a" -d input ;;
-                *) 7z x -y -oinput "$a" || unrar x -o+ -y "$a" input/ ;;
-              esac
-              rm -f "$a"
-            done
-          done
-          find input -type f ! -name ".keep" | head -50
+OUT.mkdir(parents=True, exist_ok=True)
+LOG, WARN = [], []
 
-      - name: Detect and convert
-        env:
-          NAME: ${{ inputs.name }}
-          MODE: ${{ inputs.mode }}
-        run: |
-          cd ps4tool
-          python3 auto_convert.py ../input "$NAME" "$MODE" ../out
+def log(msg=''):
+    print(msg, flush=True); LOG.append(str(msg))
 
-      - name: Check output
-        run: |
-          find out -type f ! -name info.txt | tee /tmp/out.txt
-          test -s /tmp/out.txt
+def warn(msg):
+    print(f'::warning::{msg}', flush=True); WARN.append(msg); LOG.append('[WARN] ' + msg)
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ps4-result
-          path: out
-          if-no-files-found: warn
+def finish_and_exit(code):
+    (OUT / 'info.txt').write_text('\n'.join(LOG) + '\n', encoding='utf-8')
+    sys.exit(code)
+
+JUNK_DIRS = {'__macosx', '.git', '.github'}
+JUNK_FILES = {'.ds_store', 'thumbs.db', '.keep', 'desktop.ini'}
+def listing(root):
+    res = []
+    for p in Path(root).rglob('*'):
+        if not p.is_file() or p.name.lower() in JUNK_FILES:
+            continue
+        if any(part.lower() in JUNK_DIRS for part in p.parts):
+            continue
+        res.append(p)
+    return sorted(res, key=lambda x: str(x).lower())
+
+def ext(p): return p.suffix.lower()
+def safe_id(s, fallback):
+    return re.sub(r'[^A-Za-z0-9_]', '_', s).strip('_') or fallback
+def safe_label(s):
+    return re.sub(r'[^A-Za-z0-9_-]', '_', s).strip('_') or 'item'
+
+MAP_EXT = {'.ymap', '.ytyp', '.ybn', '.ynv', '.ymf'}
+def kind_of(files):
+    """car / character / map / files  from a list of paths"""
+    e = {ext(p) for p in files}
+    n = {p.name.lower() for p in files}
+    if '.yft' in e or 'vehicles.meta' in n or 'carvariations.meta' in n:
+        return 'car'
+    if '.ydd' in e or 'peds.meta' in n:
+        return 'character'
+    if e & MAP_EXT:
+        return 'map'
+    return 'files'
+
+def clean(d):
+    shutil.rmtree(d, ignore_errors=True)
+    Path(d).mkdir(parents=True, exist_ok=True)
+
+def run_menu(stdin_text):
+    if DRY:
+        log(f'[DRY] menu input: {stdin_text!r}'); return 0
+    env = dict(os.environ, WINEDEBUG='-all', PYTHONIOENCODING='utf-8', TERM='dumb')
+    try:
+        return subprocess.run(['xvfb-run', '-a', sys.executable, '7N-RL_One_IRAQ.py'],
+                              cwd=str(ROOT), input=stdin_text, text=True, env=env,
+                              timeout=TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        warn('The tool timed out and was stopped.'); return 124
+
+def probe_rpf(rpf):
+    tmp = Path(tempfile.mkdtemp(prefix='probe_'))
+    ex = ROOT / 'RPFBuilder' / 'extract_rpf.py'
+    log(f'[DETECT] Opening {rpf.name} to see what is inside ...')
+    try:
+        subprocess.run([sys.executable, str(ex), str(rpf), str(tmp / 'x')], cwd=str(ex.parent),
+                       input='A\n', text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        warn(f'Timed out while opening {rpf.name}')
+    inner = listing(tmp)
+    log(f'[DETECT] {len(inner)} file(s) inside {rpf.name}')
+    return inner
+
+def collect(finish):
+    fin = finish / 'dlc.rpf'
+    if fin.is_file():
+        return [(fin, 'dlc.rpf')]
+    items = []
+    if finish.is_dir():
+        for p in sorted(finish.rglob('*')):
+            if p.is_file() and p.name != '.keep':
+                items.append((p, str(p.relative_to(finish))))
+    return items
+
+# ---------------------------------------------------------------- jobs
+def stage_and_run(job):
+    k = job['kind']
+    if k == 'cars_rpf':
+        d = ROOT / 'cars dlc.rpf One step'; clean(d)
+        shutil.copy2(job['rpf'], d / 'dlc.rpf')
+        clean(ROOT / 'Finish'); rc = run_menu('2\n'); return rc, ROOT / 'Finish'
+    if k == 'map_rpf':
+        d = ROOT / 'dlc.rpf map'; clean(d)
+        shutil.copy2(job['rpf'], d / 'dlc.rpf')
+        clean(ROOT / 'Finish'); rc = run_menu('3\n'); return rc, ROOT / 'Finish'
+    if k == 'character':
+        d = ROOT / 'Characters One Click' / 'file_input'; clean(d)
+        for p in job['files']:
+            if ext(p).startswith('.y'):
+                shutil.copy2(p, d / p.name)
+        clean(ROOT / 'Characters One Click' / 'Finish')
+        rc = run_menu(f"6\n{safe_id(job['spawn'], NAME_ID)}\n")
+        return rc, ROOT / 'Characters One Click' / 'Finish'
+    if k == 'vehicle':
+        d = ROOT / 'vehicles to dlc.rpf'; clean(d)
+        for p in job['files']:
+            shutil.copy2(p, d / p.name)
+        rc = run_menu(f"4\n{job['spawn']}\n"); return rc, d / 'Finish'
+    if k == 'pack5':
+        base = ROOT / '5 cars DLC'; clean(base)
+        (base / 'Finish').mkdir(exist_ok=True)
+        spawns = []
+        for i, g in enumerate(job['groups'], 1):
+            sd = base / f"{i:02d}_{g['spawn']}"; sd.mkdir()
+            for p in g['files']:
+                shutil.copy2(p, sd / p.name)
+            spawns.append(g['spawn'])
+        rc = run_menu('5\n' + ''.join(s + '\n' for s in spawns)); return rc, base / 'Finish'
+    if k == 'fivem_map':
+        base = ROOT / 'FiveM Maps One Click'; clean(base)
+        (base / 'input').mkdir(); (base / 'Finish').mkdir()
+        shutil.copytree(job['dir'], base / 'input' / safe_label(job['dir'].name))
+        rc = run_menu(f'7\n{safe_id(job["spawn"], NAME_ID)}\n'); return rc, base / 'Finish'
+    if k == 'files':
+        d = ROOT / 'file_input'; clean(d)
+        for p in job['files']:
+            shutil.copy2(p, d / p.name)
+        clean(ROOT / 'Finish')
+        rc = run_menu(f'1\nN\nY\n{NAME}\n'); return rc, ROOT / 'Finish'
+    raise ValueError(k)
+
+def build_jobs(files):
+    jobs = []
+    rpfs = [p for p in files if ext(p) == '.rpf']
+    loose = [p for p in files if ext(p) != '.rpf']
+
+    # ---- forced modes -------------------------------------------------
+    if MODE in ('cars', 'map'):
+        if not rpfs:
+            log('[ERROR] This mode needs an .rpf file in the input.'); finish_and_exit(1)
+        for r in rpfs:
+            jobs.append(dict(kind=f'{MODE}_rpf', rpf=r, label=f'{MODE}_{safe_label(r.parent.name if r.name.lower() == "dlc.rpf" else r.stem)}'))
+        return jobs
+
+    # ---- RPF files (auto) ----------------------------------------------
+    if MODE == 'auto':
+        for r in rpfs:
+            inner = [] if DRY else probe_rpf(r)
+            k = kind_of(inner) if inner else 'car'
+            tag = safe_label(r.parent.name if r.name.lower() == 'dlc.rpf' else r.stem)
+            if k == 'car':
+                jobs.append(dict(kind='cars_rpf', rpf=r, label=f'cars_{tag}'))
+            elif k == 'map':
+                jobs.append(dict(kind='map_rpf', rpf=r, label=f'map_{tag}'))
+            elif k == 'character':
+                jobs.append(dict(kind='character', files=inner, spawn=NAME_ID, label=f'characters_{tag}'))
+            else:
+                warn(f'Could not recognise {r.name} (not a car, map or character). Skipped.')
+
+    # ---- loose files ---------------------------------------------------
+    pool = list(loose)
+    if MODE in ('auto', 'fivem_map'):
+        resources = sorted({p.parent for p in pool if p.name.lower() in ('fxmanifest.lua', '__resource.lua')},
+                           key=lambda x: len(x.parts))
+        for rd in resources:
+            inside = [p for p in pool if rd in p.parents]
+            k = kind_of(inside)
+            if MODE == 'fivem_map' or k in ('map', 'files') and any(ext(p) in MAP_EXT | {'.ydr', '.ytd'} for p in inside):
+                if MODE == 'auto' and k != 'map':
+                    continue
+                jobs.append(dict(kind='fivem_map', dir=rd, spawn=NAME_ID, label=f'fivem_map_{safe_label(rd.name)}'))
+                pool = [p for p in pool if rd not in p.parents]
+
+    if MODE == 'files':
+        if pool:
+            jobs.append(dict(kind='files', files=pool, label='converted_files'))
+        return jobs
+
+    groups = {}
+    for p in pool:
+        groups.setdefault(p.parent, []).append(p)
+    car_groups, misc = [], []
+    for folder, fl in sorted(groups.items(), key=lambda kv: str(kv[0]).lower()):
+        k = kind_of(fl)
+        if MODE == 'vehicle': k = 'car' if any(ext(x) in ('.yft', '.ytd') for x in fl) else 'files'
+        if MODE == 'character': k = 'character'
+        if k == 'car':
+            car_groups.append((folder, [x for x in fl if ext(x) in ('.yft', '.ytd')]))
+        elif k == 'character':
+            jobs.append(dict(kind='character', files=fl, spawn=NAME_ID, label=f'characters_{safe_label(folder.name)}'))
+        elif k == 'map' or ext(fl[0]).startswith('.y'):
+            misc += [x for x in fl if ext(x).startswith('.y')]
+
+    used = set()
+    def spawn_for(folder, single):
+        base = NAME if single else safe_label(folder.name)
+        s, i = base, 2
+        while s.lower() in used:
+            s = f'{base}_{i}'; i += 1
+        used.add(s.lower()); return s
+
+    car_groups = [(f, fl) for f, fl in car_groups if fl]
+    if MERGE and len(car_groups) == 5:
+        gs = [dict(spawn=spawn_for(f, False), files=fl) for f, fl in car_groups]
+        jobs.append(dict(kind='pack5', groups=gs, label='pack5'))
+    else:
+        if MERGE:
+            warn(f'Merge needs exactly 5 vehicles but found {len(car_groups)}; converting them separately.')
+        for f, fl in car_groups:
+            sp = spawn_for(f, len(car_groups) == 1)
+            jobs.append(dict(kind='vehicle', files=fl, spawn=sp, label=f'car_{sp}'))
+    if misc:
+        jobs.append(dict(kind='files', files=misc, label='converted_files'))
+    return jobs
+
+# ---------------------------------------------------------------- main
+def human(n):
+    for u in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or u == 'GB':
+            return f'{n:.1f} {u}' if u != 'B' else f'{n} B'
+        n /= 1024
+
+log(f'GTA V PC -> PS4 auto driver v{VERSION}')
+log(f'[SETTINGS] name={NAME} mode={MODE} merge={MERGE}')
+files = listing(SRC)
+log(f'[INPUT] {len(files)} file(s):')
+for p in files[:60]:
+    log('   - ' + str(p.relative_to(SRC)))
+if len(files) > 60: log(f'   ... and {len(files) - 60} more')
+if not files:
+    log('[ERROR] No input files were found. Upload the mod to a Release and write its Tag.')
+    finish_and_exit(1)
+
+jobs = build_jobs(files)
+if not jobs:
+    log('[ERROR] Nothing to convert (no supported files recognised).')
+    finish_and_exit(1)
+log(f'[PLAN] {len(jobs)} job(s): ' + ', '.join(f"{j['kind']}:{j['label']}" for j in jobs))
+
+results, total_found = [], 0
+single = len(jobs) == 1
+for n, job in enumerate(jobs, 1):
+    log(f'\n===== JOB {n}/{len(jobs)}: {job["kind"]} ({job["label"]}) =====')
+    t0 = time.time(); items, rc = [], None
+    for attempt in (1, 2):
+        rc, fin = stage_and_run(job)
+        items = collect(fin) if not DRY else []
+        if items or DRY: break
+        warn(f'{job["label"]}: no output on attempt {attempt}' + (' - retrying once' if attempt == 1 else ''))
+    dest = OUT / NAME if single else OUT / NAME / safe_label(job['label'])
+    saved = []
+    for src, rel in items:
+        t = dest / rel; t.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, t); saved.append((rel, t.stat().st_size, hashlib.sha256(t.read_bytes()).hexdigest()[:12]))
+    total_found += len(saved)
+    results.append(dict(job=job, rc=rc, saved=saved, secs=time.time() - t0))
+    log(f'[JOB] exit code {rc}; {len(saved)} output file(s) in {int(time.time() - t0)}s')
+    for rel, sz, h in saved:
+        log(f'   -> {rel}  {human(sz)}  sha256:{h}')
+    if not saved:
+        warn(f'{job["label"]}: FAILED - no output produced (see the log above).')
+    elif rc not in (0, None):
+        warn(f'{job["label"]}: output created but the tool returned code {rc}; test it before using.')
+
+ok = sum(1 for r in results if r['saved'])
+log(f'\n[RESULT] {ok}/{len(results)} job(s) produced files; folder "{NAME}"')
+
+summ = os.environ.get('GITHUB_STEP_SUMMARY')
+if summ:
+    lines = [f'## PS4 converter v{VERSION}', '', f'Folder: **{NAME}**', '',
+             '| Job | Result | File | Size |', '|---|---|---|---|']
+    for r in results:
+        if r['saved']:
+            for rel, sz, h in r['saved']:
+                lines.append(f"| {r['job']['label']} | OK | {rel} | {human(sz)} |")
+        else:
+            lines.append(f"| {r['job']['label']} | FAILED | - | - |")
+    if WARN: lines += ['', '### Warnings'] + [f'- {w}' for w in WARN]
+    with open(summ, 'a', encoding='utf-8') as fh: fh.write('\n'.join(lines) + '\n')
+
+finish_and_exit(0 if (total_found or DRY) else 1)
+PYEOF
+python3 -m py_compile auto_convert.py && echo compiled
