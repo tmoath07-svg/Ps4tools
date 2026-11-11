@@ -14,18 +14,14 @@ on:
           - تحويل سيارة إلى DLC للسوني
           - تحويل الملفات وبناء RPF
           - تحويل DLC الكمبيوتر إلى DLC السوني
-          - تحويل مود FiveM متعدد السيارات إلى DLC للسوني
           - استخراج الصور من YTD
           - فك ملفات RPF
           - بناء ملف RPF
-          - تحويل خريطة DLC إلى DLC السوني
-          - تحويل شخصية إلى DLC للسوني
-          - تحويل خريطة FiveM إلى DLC للسوني
       toolkit_zip:
         description: "اسم ZIP الأدوات في جذر المستودع"
         required: true
         type: string
-        default: "ps4tool.zip"
+        default: "ZokiiStudio-Toolkit-FIXED.zip"
       release_tag:
         description: "Release Tag للمود (اختياري)"
         required: false
@@ -42,7 +38,7 @@ on:
         type: string
         default: "input"
       vehicle_spawn_name:
-        description: "اسم السباون (سيارة / شخصية / خريطة): حروف إنجليزية وأرقام و _ فقط"
+        description: "اسم سباون السيارة داخل GTA"
         required: true
         type: string
         default: "buccaneer2"
@@ -60,17 +56,15 @@ env:
 
 jobs:
   run-toolkit:
-    # GitHub retires the ubuntu-22.04 runner on 2027-04-17 (failing brownouts from 2027-03-23).
-    # Before that date, test with ubuntu-24.04.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -129,20 +123,16 @@ jobs:
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends p7zip-full
-          # RAR support (needs the multiverse packages). Optional: a failure here is
-          # reported later, only if a .rar file is really uploaded.
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends p7zip-rar unrar || \
-            echo "WARNING: p7zip-rar/unrar unavailable - .rar files may not extract."
           command -v 7z
 
-          if [[ "${{ inputs.mode }}" == "تحويل ملفات PC إلى PS4" || "${{ inputs.mode }}" == "تحويل سيارة إلى DLC للسوني" || "${{ inputs.mode }}" == "تحويل الملفات وبناء RPF" || "${{ inputs.mode }}" == "تحويل DLC الكمبيوتر إلى DLC السوني" || "${{ inputs.mode }}" == "تحويل مود FiveM متعدد السيارات إلى DLC للسوني" || "${{ inputs.mode }}" == "بناء ملف RPF" || "${{ inputs.mode }}" == "تحويل خريطة DLC إلى DLC السوني" || "${{ inputs.mode }}" == "تحويل شخصية إلى DLC للسوني" || "${{ inputs.mode }}" == "تحويل خريطة FiveM إلى DLC للسوني" ]]; then
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine wine64 xvfb
+          if [[ "${{ inputs.mode }}" == "تحويل ملفات PC إلى PS4" || "${{ inputs.mode }}" == "تحويل سيارة إلى DLC للسوني" || "${{ inputs.mode }}" == "تحويل الملفات وبناء RPF" || "${{ inputs.mode }}" == "تحويل DLC الكمبيوتر إلى DLC السوني" || "${{ inputs.mode }}" == "بناء ملف RPF" ]]; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine64 xvfb
             command -v xvfb-run
 
             # Ubuntu 22.04 may expose Wine through /usr/bin/wine while the
             # wine64 binary itself lives under /usr/lib/wine. Prefer the
             # supported wrapper and fall back to the packaged binary.
-            WINE_CMD="$(command -v wine64 || command -v wine || true)"
+            WINE_CMD="$(command -v wine64 || true)"
             if [ -z "$WINE_CMD" ] && [ -x /usr/lib/wine/wine64 ]; then
               WINE_CMD="/usr/lib/wine/wine64"
             fi
@@ -191,31 +181,24 @@ jobs:
           )"
             curl -fL --retry 3 --retry-delay 3 --connect-timeout 30 "$URL" -o "$INPUT_FOLDER/$name"
           fi
-          if [ -z "$(find "$INPUT_FOLDER" -type f ! -name '.keep' -print -quit)" ]; then
+          if [ -z "$(find "$INPUT_FOLDER" -type f -print -quit)" ]; then
             echo "ERROR: مجلد input فارغ. ارفع المود داخله أو استخدم Release Tag/URL."
             exit 1
           fi
-          # Extract archives (also archives inside archives). RAR needs p7zip-rar or unrar.
           for pass in 1 2 3; do
             while IFS= read -r -d '' archive; do
               dest="$(dirname "$archive")"
               case "${archive,,}" in
                 *.zip|*.rar|*.7z)
-                  if 7z x -y "-o$dest" "$archive" >/dev/null 2>&1; then
-                    rm -f "$archive"
-                  elif command -v unrar >/dev/null 2>&1 && unrar x -o+ -y "$archive" "$dest/" >/dev/null 2>&1; then
+                  if 7z x -y "-o$dest" "$archive" >/dev/null; then
                     rm -f "$archive"
                   else
-                    echo "ERROR: تعذر فك $archive (RAR يحتاج p7zip-rar أو unrar، أو الملف تالف/عليه كلمة سر)."
-                    exit 1
+                    echo "WARNING: تعذر فك $archive، تم الاحتفاظ به."
                   fi
                   ;;
               esac
             done < <(find "$INPUT_FOLDER" -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) -print0)
           done
-          # Remove macOS leftovers so they are never mistaken for mod files.
-          find "$INPUT_FOLDER" -name '__MACOSX' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-          find "$INPUT_FOLDER" \( -name '.DS_Store' -o -name 'Thumbs.db' \) -type f -delete 2>/dev/null || true
           echo "Input files:"
           find "$INPUT_FOLDER" -type f | head -300
 
@@ -249,201 +232,7 @@ jobs:
               print(f"OK {item['file']} ({item['bytes']} bytes)")
           PY
 
-      - name: Build FiveM multi-vehicle DLC for PS4
-        if: ${{ inputs.mode == 'تحويل مود FiveM متعدد السيارات إلى DLC للسوني' }}
-        env:
-          INPUT_FOLDER: ${{ inputs.input_folder }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > toolkit/fivem_multi_vehicle_dlc.py <<'PY'
-          #!/usr/bin/env python3
-          """Build a PS4 add-on DLC from a FiveM resource with multiple vehicle folders."""
-          from pathlib import Path
-          import importlib.util
-          import shutil
-          import sys
-          import xml.etree.ElementTree as ET
-          
-          
-          def main(input_arg: str) -> int:
-              root = Path(__file__).resolve().parent
-              toolkit_script = root / '7N-RL_One_IRAQ.py'
-              spec = importlib.util.spec_from_file_location('zokii_toolkit', toolkit_script)
-              if spec is None or spec.loader is None:
-                  raise RuntimeError('Could not load the Zokii toolkit module.')
-              z = importlib.util.module_from_spec(spec)
-              spec.loader.exec_module(z)
-          
-              input_root = Path(input_arg).resolve()
-              if not input_root.exists():
-                  raise RuntimeError(f'Input path does not exist: {input_root}')
-          
-              resource_roots = []
-              for stream in input_root.rglob('stream'):
-                  if stream.is_dir() and (stream.parent / 'data').is_dir():
-                      resource_roots.append(stream.parent)
-              if input_root.is_dir() and (input_root / 'stream').is_dir() and (input_root / 'data').is_dir():
-                  resource_roots.append(input_root)
-              # Keep only outermost resource roots to avoid selecting nested duplicates.
-              unique = []
-              for candidate in sorted(set(resource_roots), key=lambda p: (len(p.parts), str(p).lower())):
-                  if not any(parent == candidate or parent in candidate.parents for parent in unique):
-                      unique.append(candidate)
-              if len(unique) != 1:
-                  raise RuntimeError(
-                      f'Expected exactly one FiveM resource containing sibling stream/ and data/ folders; found {len(unique)}.'
-                  )
-              resource = unique[0]
-              stream_root = resource / 'stream'
-              data_root = resource / 'data'
-          
-              vehicle_dirs = []
-              for d in sorted((p for p in stream_root.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
-                  if any(p.is_file() and p.suffix.lower() == '.yft' for p in d.rglob('*')):
-                      vehicle_dirs.append(d)
-              if not vehicle_dirs:
-                  raise RuntimeError('No vehicle subfolders with .yft files were found inside stream/.')
-              if len(vehicle_dirs) > 12:
-                  raise RuntimeError(f'Found {len(vehicle_dirs)} vehicle folders. Safety limit for one pack is 12.')
-          
-              resource_label = resource.name
-              if resource_label.lower() in {'input', 'mod', 'resource', 'resources'}:
-                  resource_label = vehicle_dirs[0].name
-              dlc_name = z._sanitize_vehicle_name(resource_label)
-              work_base = root / 'FiveM Multi Vehicle to DLC'
-              build_root = work_base / '_build'
-              finish_dir = work_base / 'Finish'
-              shutil.rmtree(build_root, ignore_errors=True)
-              finish_dir.mkdir(parents=True, exist_ok=True)
-              build_root.mkdir(parents=True, exist_ok=True)
-          
-              common = build_root / 'common' / 'data'
-              (common / 'ai').mkdir(parents=True, exist_ok=True)
-              vehicle_source = build_root / 'x64' / 'levels' / 'gta5' / 'vehicles' / f'{dlc_name}vehicles_source'
-              vehicle_source.mkdir(parents=True, exist_ok=True)
-          
-              metadata_names = ('vehicles.meta', 'handling.meta', 'carvariations.meta', 'carcols.meta', 'vehiclelayouts.meta')
-              metadata_inputs = {name: [] for name in metadata_names}
-              vehicle_entries = []
-              used_names = set()
-          
-              for vehicle_dir in vehicle_dirs:
-                  old_model, model_files, _mods_rpfs, _other_rpfs = z._discover_replacement_vehicle(vehicle_dir)
-                  spawn = z._sanitize_vehicle_name(vehicle_dir.name)
-                  if spawn in used_names:
-                      raise RuntimeError(f'Duplicate spawn name after normalization: {spawn}')
-                  used_names.add(spawn)
-                  if not model_files:
-                      raise RuntimeError(f'No model resources found for {vehicle_dir.name}.')
-                  for p in model_files:
-                      stem = p.stem.lower()
-                      if stem == old_model.lower() + '_hi':
-                          out_name = f'{spawn}_hi{p.suffix.lower()}'
-                      elif stem == old_model.lower():
-                          out_name = f'{spawn}{p.suffix.lower()}'
-                      else:
-                          out_name = f'{spawn}_{p.name}'
-                      target = vehicle_source / out_name
-                      if target.exists():
-                          raise RuntimeError(f'Output resource collision: {out_name}')
-                      shutil.copy2(p, target)
-          
-                  meta_dir = data_root / vehicle_dir.name
-                  if not meta_dir.is_dir():
-                      raise RuntimeError(f'Missing matching metadata folder: data/{vehicle_dir.name}/')
-                  found_for_vehicle = set()
-                  for meta_file in meta_dir.rglob('*'):
-                      if not meta_file.is_file() or meta_file.name.lower() not in metadata_inputs:
-                          continue
-                      key = meta_file.name.lower()
-                      metadata_inputs[key].append((meta_file, old_model, spawn))
-                      found_for_vehicle.add(key)
-                  missing = {'vehicles.meta', 'handling.meta', 'carvariations.meta'} - found_for_vehicle
-                  if missing:
-                      raise RuntimeError(f'{vehicle_dir.name}: missing required META files: {", ".join(sorted(missing))}')
-                  vehicle_entries.append((old_model, spawn, vehicle_dir.name))
-                  print(f'[FiveM] {vehicle_dir.name}: model={old_model}, spawn={spawn}, model_files={len(model_files)}')
-          
-              # Merge metadata from each vehicle into the corresponding DLC metadata file.
-              destinations = {
-                  'vehicles.meta': common / 'vehicles.meta',
-                  'handling.meta': common / 'handling.meta',
-                  'carvariations.meta': common / 'carvariations.meta',
-                  'carcols.meta': common / 'carcols.meta',
-                  'vehiclelayouts.meta': common / 'ai' / 'vehiclelayouts.meta',
-              }
-              for name, items in metadata_inputs.items():
-                  if not items:
-                      continue
-                  out = destinations[name]
-                  ok = z._merge_vehicle_meta_files(items, out, [(old, spawn) for _path, old, spawn in items])
-                  if not ok:
-                      raise RuntimeError(f'Could not parse/merge {name}; check its XML format.')
-          
-              # Keep optional text/unlock metadata when supplied, otherwise create valid empty containers.
-              optional_defaults = {
-                  'dlctext.meta': '<?xml version="1.0" encoding="UTF-8"?><CTextFileMerger__InitDataList><dataFiles /></CTextFileMerger__InitDataList>',
-                  'carraddonContentUnlocks.meta': '<?xml version="1.0" encoding="UTF-8"?><CContentUnlockingMetaData><contentUnlockingItems /></CContentUnlockingMetaData>',
-              }
-              for name, default in optional_defaults.items():
-                  candidates = list(data_root.rglob(name))
-                  if candidates:
-                      shutil.copy2(candidates[0], common / name)
-                  else:
-                      (common / name).write_text(default, encoding='utf-8')
-          
-              z._write_multi_dlc_descriptor(build_root, dlc_name, vehicle_entries, [])
-          
-              builder = root / 'RPFBuilder' / 'build_rpf.py'
-              archive = builder.parent / 'Archive.rpf'
-              if archive.exists():
-                  archive.unlink()
-              result = z.safe_subprocess_run([sys.executable, str(builder), str(vehicle_source)], cwd=str(builder.parent))
-              if result.returncode != 0 or not archive.is_file() or archive.stat().st_size == 0:
-                  raise RuntimeError('Failed to build the inner vehicles RPF.')
-              vehicle_rpf = vehicle_source.parent / f'{dlc_name}vehicles.rpf'
-              shutil.move(str(archive), str(vehicle_rpf))
-              shutil.rmtree(vehicle_source, ignore_errors=True)
-          
-              final_build = finish_dir / 'dlc.rpf'
-              if final_build.exists():
-                  final_build.unlink()
-              if archive.exists():
-                  archive.unlink()
-              result = z.safe_subprocess_run([sys.executable, str(builder), str(build_root)], cwd=str(builder.parent))
-              if result.returncode != 0 or not archive.is_file() or archive.stat().st_size == 0:
-                  raise RuntimeError('Failed to build the initial multi-vehicle DLC RPF.')
-              shutil.move(str(archive), str(final_build))
-          
-              # Convert generated Y* resources, rebuild nested RPFs, and switch x64 to ps4.
-              z._convert_generated_vehicle_dlc_rpf(final_build, builder, root)
-              if not final_build.is_file() or final_build.stat().st_size == 0:
-                  raise RuntimeError('The final PS4 DLC RPF is missing or empty.')
-          
-              (finish_dir / 'dlclist-entry.txt').write_text(
-                  f'<Item>dlcpacks:/{dlc_name}/</Item>\n', encoding='utf-8'
-              )
-              (finish_dir / 'spawn-names.txt').write_text(
-                  '\n'.join(spawn for _old, spawn, _folder in vehicle_entries) + '\n', encoding='utf-8'
-              )
-              print(f'[SUCCESS] Built multi-vehicle PS4 DLC: {final_build}')
-              print(f'[SUCCESS] DLC folder name: {dlc_name}')
-              print('[SUCCESS] Spawn names: ' + ', '.join(spawn for _old, spawn, _folder in vehicle_entries))
-              return 0
-          
-          
-          if __name__ == '__main__':
-              try:
-                  raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else 'input'))
-              except Exception as exc:
-                  print(f'[FiveM DLC ERROR] {type(exc).__name__}: {exc}', file=sys.stderr)
-                  raise SystemExit(1)
-          PY
-          xvfb-run -a python toolkit/fivem_multi_vehicle_dlc.py "$INPUT_FOLDER"
-          test -s "toolkit/FiveM Multi Vehicle to DLC/Finish/dlc.rpf"
-
-      - name: Build vehicles as PS4 DLC (one DLC per car)
+      - name: Build one vehicle as a PS4 DLC
         if: ${{ inputs.mode == 'تحويل سيارة إلى DLC للسوني' }}
         env:
           INPUT_FOLDER: ${{ inputs.input_folder }}
@@ -451,69 +240,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os, re, shutil, subprocess, sys
-          from pathlib import Path
-
-          src = Path(os.environ["INPUT_FOLDER"])
-          spawn_in = os.environ["SPAWN_NAME"].strip()
-          base = Path("toolkit/vehicles to dlc.rpf")
-          out_root = Path("result/vehicles")
-
-          def safe(s):
-              return re.sub(r"[^A-Za-z0-9_]", "_", s).strip("_") or "vehicle"
-
-          res = [p for p in src.rglob("*") if p.is_file() and p.suffix.lower() in (".yft", ".ytd")]
-          models, seen = [], set()
-          for p in sorted(res, key=lambda x: str(x).lower()):
-              if p.suffix.lower() != ".yft":
-                  continue
-              m = p.stem[:-3] if p.stem.lower().endswith("_hi") else p.stem
-              if m.lower() not in seen:
-                  seen.add(m.lower()); models.append(m)
-          if not models:
-              raise SystemExit("ERROR: ما لقيت ملفات .yft داخل المود.")
-          print(f"Found {len(models)} vehicle model(s): {', '.join(models)}")
-          if len(models) > 1:
-              print("Several cars found: each one becomes its own DLC and uses its model name as spawn name.")
-
-          used, ok = set(), 0
-          for model in models:
-              spawn = safe(spawn_in) if len(models) == 1 else safe(model)
-              base_spawn, k = spawn, 2
-              while spawn.lower() in used:
-                  spawn = f"{base_spawn}_{k}"; k += 1
-              used.add(spawn.lower())
-
-              files = [p for p in res if p.stem.lower() in (model.lower(), model.lower() + "_hi")]
-              if not any(p.suffix.lower() == ".ytd" for p in files):
-                  yft = next(p for p in files if p.suffix.lower() == ".yft")
-                  files += [p for p in res if p.suffix.lower() == ".ytd" and p.parent == yft.parent]
-              shutil.rmtree(base, ignore_errors=True)
-              base.mkdir(parents=True)
-              names = set()
-              for p in files:
-                  if p.name.lower() in names:
-                      continue
-                  names.add(p.name.lower())
-                  shutil.copy2(p, base / p.name)
-
-              print(f"\n===== {model} -> spawn name: {spawn} ({len(names)} files) =====", flush=True)
-              subprocess.run(["xvfb-run", "-a", sys.executable, "7N-RL_One_IRAQ.py"],
-                             cwd="toolkit", input=f"4\n{spawn}\n", text=True)
-              fin = base / "Finish" / "dlc.rpf"
-              if fin.is_file() and fin.stat().st_size:
-                  dst = out_root / spawn
-                  dst.mkdir(parents=True, exist_ok=True)
-                  shutil.copy2(fin, dst / "dlc.rpf")
-                  ok += 1
-                  print(f"OK: {model} -> result/vehicles/{spawn}/dlc.rpf ({fin.stat().st_size:,} bytes)")
-              else:
-                  print(f"::warning::{model}: لم يتم إنشاء dlc.rpf لهذي السيارة. راجع السجل أعلاه.")
-          print(f"\nDone: {ok}/{len(models)} vehicle DLC(s) created.")
-          if ok == 0:
-              raise SystemExit("ERROR: لم يتم إنشاء أي DLC. راجع سجل بناء السيارة والتحويل.")
-          PY
+          TARGET="toolkit/vehicles to dlc.rpf/mod_input"
+          mkdir -p "$TARGET"
+          cp -a "$INPUT_FOLDER/." "$TARGET/"
+          # Menu option 4 builds a full replacement-vehicle DLC. The next line
+          # supplies the spawn name requested by vehicles_to_dlc_rpf().
+          printf '4\n%s\n' "$SPAWN_NAME" | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
+          test -s "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" || {
+            echo "ERROR: لم يتم إنشاء DLC. راجع سجل بناء السيارة والتحويل."
+            exit 1
+          }
 
       - name: Convert complete PC DLC RPF to PS4 DLC RPF
         if: ${{ inputs.mode == 'تحويل DLC الكمبيوتر إلى DLC السوني' }}
@@ -567,67 +303,12 @@ jobs:
           # Menu option 2 is the toolkit's actual full-DLC pipeline:
           # extract DLC RPF, recursively convert nested resources, rebuild nested RPFs,
           # then build the final PS4 dlc.rpf. No vehicle spawn name is requested.
-          rm -rf toolkit/Finish && mkdir -p toolkit/Finish
           printf '2\n' | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
           test -s "toolkit/Finish/dlc.rpf" || {
             echo "ERROR: لم تنتج الأداة ملف PS4 dlc.rpf. راجع سجل DLC One Click أعلاه."
             exit 1
           }
           echo "SUCCESS: PS4 DLC created at toolkit/Finish/dlc.rpf"
-
-      - name: Convert map DLC RPF to PS4 map DLC
-        if: ${{ inputs.mode == 'تحويل خريطة DLC إلى DLC السوني' }}
-        env:
-          INPUT_FOLDER: ${{ inputs.input_folder }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="$(find "$INPUT_FOLDER" -type f -iname 'dlc.rpf' -print -quit)"
-          [ -n "$SRC" ] || SRC="$(find "$INPUT_FOLDER" -type f -iname '*.rpf' -print -quit)"
-          test -n "$SRC" || { echo "ERROR: ما لقيت ملف RPF للخريطة."; exit 1; }
-          rm -rf "toolkit/dlc.rpf map" toolkit/Finish
-          mkdir -p "toolkit/dlc.rpf map" toolkit/Finish
-          cp "$SRC" "toolkit/dlc.rpf map/dlc.rpf"
-          echo "Selected map RPF: $SRC"
-          printf '3\n' | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
-          test -s toolkit/Finish/dlc.rpf || { echo "ERROR: لم تنتج الأداة dlc.rpf للخريطة. راجع السجل."; exit 1; }
-
-      - name: Convert character files to PS4 DLC
-        if: ${{ inputs.mode == 'تحويل شخصية إلى DLC للسوني' }}
-        env:
-          INPUT_FOLDER: ${{ inputs.input_folder }}
-          SPAWN_NAME: ${{ inputs.vehicle_spawn_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          NAME="$(printf '%s' "$SPAWN_NAME" | tr -c 'A-Za-z0-9_' '_')"
-          D="toolkit/Characters One Click"
-          rm -rf "$D/file_input" "$D/Finish"
-          mkdir -p "$D/file_input" "$D/Finish"
-          find "$INPUT_FOLDER" -type f -iname '*.y*' -exec cp -n {} "$D/file_input/" \;
-          test -n "$(ls -A "$D/file_input")" || { echo "ERROR: ما لقيت ملفات الشخصية (ydd/ytd/...)."; exit 1; }
-          ls "$D/file_input"
-          printf '6\n%s\n' "$NAME" | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
-          test -s "$D/Finish/dlc.rpf" || { echo "ERROR: لم تنتج الأداة dlc.rpf للشخصية. راجع السجل."; exit 1; }
-
-      - name: Convert FiveM map to PS4 DLC
-        if: ${{ inputs.mode == 'تحويل خريطة FiveM إلى DLC للسوني' }}
-        env:
-          INPUT_FOLDER: ${{ inputs.input_folder }}
-          SPAWN_NAME: ${{ inputs.vehicle_spawn_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          NAME="$(printf '%s' "$SPAWN_NAME" | tr -c 'A-Za-z0-9_' '_')"
-          D="toolkit/FiveM Maps One Click"
-          rm -rf "$D"
-          mkdir -p "$D/input" "$D/Finish"
-          MANIFEST="$(find "$INPUT_FOLDER" -type f \( -iname 'fxmanifest.lua' -o -iname '__resource.lua' \) -print -quit)"
-          if [ -n "$MANIFEST" ]; then SRC="$(dirname "$MANIFEST")"; else SRC="$INPUT_FOLDER"; fi
-          echo "FiveM resource folder: $SRC"
-          cp -a "$SRC" "$D/input/resource"
-          printf '7\n%s\n' "$NAME" | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
-          test -s "$D/Finish/dlc.rpf" || { echo "ERROR: لم تنتج الأداة dlc.rpf لخريطة FiveM. راجع السجل."; exit 1; }
 
       - name: Convert PC resources to PS4 resources
         if: ${{ inputs.mode == 'تحويل ملفات PC إلى PS4' || inputs.mode == 'تحويل الملفات وبناء RPF' }}
@@ -667,16 +348,9 @@ jobs:
           for p in selected:
               print(f" - {p.name}")
           PY
-          # Run the converter directly (not through the menu): the number of questions it
-          # asks depends on the textures, so fixed menu answers can end up in the wrong place.
-          # "Y" = if a YTD is above the 130 MB PS4 limit, skip that YTD and keep converting.
-          set +e
-          ( cd toolkit && { yes Y 2>/dev/null || true; } | xvfb-run -a python core_converter.py file_input 2>&1 | tee ../convert.log )
-          RC=${PIPESTATUS[0]}
-          set -e
-          echo "converter exit code: $RC"
-          grep -E "WARNING|SKIPPED|STOPPED|FAILED|ERROR" convert.log | sed 's/\x1b\[[0-9;]*m//g' > convert-warnings.txt || true
-          if [ -s convert-warnings.txt ]; then echo "::warning::الأداة سجّلت تحذيرات (مثل YTD أكبر من 130MB). راجع convert-warnings.txt في النتيجة."; fi
+          # First blank selects normal mode. The two N answers preserve originals
+          # and decline the optional interactive RPF build in the converter.
+          printf '\nN\nN\n' | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
           if [ -z "$(find toolkit/file_input/archive_input -type f -print -quit)" ]; then
             echo "ERROR: المحول لم ينتج أي ملفات. راجع سجل التحويل."
             exit 1
@@ -760,20 +434,11 @@ jobs:
           if [ -f toolkit/RPFBuilder/Archive.rpf ]; then
             cp toolkit/RPFBuilder/Archive.rpf result/Archive.rpf
           fi
-          # Vehicles are already copied to result/vehicles/<spawn>/dlc.rpf by their own step.
-          for f in "toolkit/Finish/dlc.rpf" \
-                   "toolkit/Characters One Click/Finish/dlc.rpf" \
-                   "toolkit/FiveM Maps One Click/Finish/dlc.rpf"; do
-            if [ -f "$f" ]; then cp "$f" result/dlc.rpf; fi
-          done
-          for f in convert.log convert-warnings.txt; do
-            if [ -f "$f" ]; then cp "$f" result/; fi
-          done
-          if [ -f "toolkit/FiveM Multi Vehicle to DLC/Finish/dlc.rpf" ]; then
-            mkdir -p result/FiveM-PS4-DLC
-            cp "toolkit/FiveM Multi Vehicle to DLC/Finish/dlc.rpf" result/FiveM-PS4-DLC/dlc.rpf
-            cp "toolkit/FiveM Multi Vehicle to DLC/Finish/dlclist-entry.txt" result/FiveM-PS4-DLC/ 2>/dev/null || true
-            cp "toolkit/FiveM Multi Vehicle to DLC/Finish/spawn-names.txt" result/FiveM-PS4-DLC/ 2>/dev/null || true
+          if [ -f "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" ]; then
+            cp "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" result/dlc.rpf
+          fi
+          if [ -f "toolkit/Finish/dlc.rpf" ]; then
+            cp "toolkit/Finish/dlc.rpf" result/dlc.rpf
           fi
           if [ -f conversion-report.tsv ]; then
             cp conversion-report.tsv result/
@@ -781,19 +446,17 @@ jobs:
           if [ -d "toolkit/Conversion failed ❌" ]; then
             cp -a "toolkit/Conversion failed ❌" result/
           fi
-          # Only the extract modes need the extracted files; other modes must not
-          # re-upload the original mod.
-          if [ -d "$INPUT_FOLDER" ] && { [ "$MODE" = "استخراج الصور من YTD" ] || [ "$MODE" = "فك ملفات RPF" ]; }; then
+          if [ -d "$INPUT_FOLDER" ]; then
             mkdir -p result/input-and-extracted
             cp -a "$INPUT_FOLDER/." result/input-and-extracted/
           fi
           if [ -f tool-audit.json ]; then cp tool-audit.json result/; fi
-          printf 'mode=%s\nrun=%s\n' "$MODE" "$GITHUB_RUN_NUMBER" > result/run-info.txt
+          printf 'mode=%s\n' "$MODE" > result/run-info.txt
           find result -type f -printf '%p (%s bytes)\n' | head -500 > result/file-list.txt
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: zokii-studio-${{ inputs.mode }}
           path: result/
