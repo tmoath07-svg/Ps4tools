@@ -3,384 +3,98 @@ name: Convert GTA V mod to PS4
 on:
   workflow_dispatch:
     inputs:
-      name:
-        description: "اسم المجلد (انجليزي بدون مسافات)"
-        required: true
-        default: converted
-        type: string
-
-      release_tag:
-        description: "اسم الـ Release Tag (اختياري)"
-        required: false
-        default: ""
-        type: string
-
       mode:
-        description: "Conversion Mode"
-        required: true
+        description: "نوع التحويل"
         type: choice
-        default: auto
+        default: files
         options:
-          - auto
-          - cars
-          - map
-          - vehicle
-          - character
           - files
-
-      merge:
-        description: "دمج السيارات"
-        required: false
-        default: false
-        type: boolean
-
-      url:
-        description: "رابط تحميل مباشر (اختياري)"
+          - cars_dlc
+      name:
+        description: "اسم الملف الناتج (انجليزي بدون مسافات)"
+        default: converted
+      release_tag:
+        description: "اسم الـ Release اللي رفعت فيه الملفات الكبيرة (اختياري)"
         required: false
         default: ""
-        type: string
-
-permissions:
-  contents: read
+      url:
+        description: "رابط تحميل مباشر للملفات (اختياري)"
+        required: false
+        default: ""
 
 jobs:
   convert:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
-
     steps:
+      - uses: actions/checkout@v4
 
-      # =========================
-      # Checkout
-      # =========================
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # =========================
-      # Configure Ubuntu mirrors
-      # =========================
-
-      - name: Configure Ubuntu mirrors
+      - name: Install Wine
         run: |
-          set -euo pipefail
-
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-
-            {
-              printf '%s\tpriority:1\n' \
-                'https://mirrors.edge.kernel.org/ubuntu/'
-
-              printf '%s\tpriority:2\n' \
-                'https://archive.ubuntu.com/ubuntu/'
-
-              printf '%s\tpriority:3\n' \
-                'https://security.ubuntu.com/ubuntu/'
-            } | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
-
-          else
-            echo "APT mirror list not found."
-            exit 1
-          fi
-
-          sudo tee /etc/apt/apt.conf.d/99-ci-network > /dev/null <<'EOF'
-          Acquire::Retries "1";
-          Acquire::http::Timeout "20";
-          Acquire::https::Timeout "20";
-          Acquire::Mirror::Fanout "1";
-          EOF
-
-          echo "Configured mirrors:"
-          cat /etc/apt/apt-mirrors.txt
-
-      # =========================
-      # Install tools
-      # =========================
-
-      - name: Install tools
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-
-          echo "Updating package lists..."
-
-          timeout 180 sudo apt-get update
-
-          echo "Checking existing tools..."
-
-          command -v python3
-          command -v 7z
-          command -v unzip
-          command -v xvfb-run
-          command -v curl
-          command -v file
-          command -v gh
-
-          echo "Installing Wine and UnRAR..."
-
-          timeout 600 sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y \
-            --no-install-recommends \
-            wine \
-            wine64 \
-            unrar
-
-          echo "Checking Python pip..."
-
-          python3 -m pip --version
-
-          echo "Installing Python dependencies..."
-
-          python3 -m pip install \
-            --user \
-            --no-cache-dir \
-            pycryptodome \
-            watchdog
-
-          echo "Checking Wine..."
-
-          wine --version
-
-          echo "All dependencies installed successfully!"
-
-      # =========================
-      # Prepare converter
-      # =========================
+          sudo apt-get update -y
+          sudo apt-get install -y wine wine64 xvfb unzip python3
+          python3 -m pip install pycryptodome watchdog
 
       - name: Unpack tool
         run: |
-          set -euo pipefail
-
-          test -f auto_convert.py || {
-            echo "ERROR: auto_convert.py is missing"
-            exit 1
-          }
-
-          test -f ps4tool.zip || {
-            echo "ERROR: ps4tool.zip is missing"
-            exit 1
-          }
-
-          mkdir -p ps4tool
-
-          unzip -q -o ps4tool.zip -d ps4tool
-
-          if [ ! -f ps4tool/7N-RL_One_IRAQ.py ] && \
-             [ -d ps4tool/ps4tool ]; then
-
-            cp -a ps4tool/ps4tool/. ps4tool/
-
-          fi
-
-          if [ ! -f ps4tool/7N-RL_One_IRAQ.py ]; then
-            echo "ERROR: Converter tool was not found."
-            find ps4tool -maxdepth 4 -type f
-            exit 1
-          fi
-
-          cp auto_convert.py ps4tool/auto_convert.py
-
-          mkdir -p \
-            ps4tool/file_input \
-            ps4tool/Finish \
-            input \
-            out
-
-          echo "Tool prepared successfully."
-
-      # =========================
-      # Download input
-      # =========================
+          unzip -q ps4tool.zip
+          mkdir -p ps4tool/file_input "ps4tool/cars dlc.rpf One step" ps4tool/Finish
 
       - name: Gather input files
         env:
+          MODE: ${{ inputs.mode }}
           URL: ${{ inputs.url }}
           TAG: ${{ inputs.release_tag }}
           GH_TOKEN: ${{ github.token }}
-
         run: |
-          set -euo pipefail
-
           mkdir -p input
-
           if [ -n "$TAG" ]; then
-
-            echo "Downloading release: $TAG"
-
-            gh release download "$TAG" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --dir input \
-              --clobber
-
+            gh release download "$TAG" --repo "${{ github.repository }}" --dir input --clobber
+            for z in input/*.zip; do
+              [ -f "$z" ] && unzip -q -o "$z" -d input && rm -f "$z"
+            done
           fi
-
           if [ -n "$URL" ]; then
-
-            echo "Downloading URL..."
-
-            curl -L \
-              --fail \
-              --retry 3 \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              -o /tmp/download \
-              "$URL"
-
-            FILE_TYPE=$(file -b /tmp/download)
-
-            echo "Detected file: $FILE_TYPE"
-
-            if echo "$FILE_TYPE" | grep -qi "RAR"; then
-
-              mv /tmp/download input/download.rar
-
-            elif echo "$FILE_TYPE" | grep -qi "Zip"; then
-
-              mv /tmp/download input/download.zip
-
-            elif echo "$FILE_TYPE" | grep -Eqi "7-zip|7z archive"; then
-
-              mv /tmp/download input/download.7z
-
+            curl -L --fail -o /tmp/download "$URL"
+            if unzip -tq /tmp/download >/dev/null 2>&1; then
+              unzip -q -o /tmp/download -d input
             else
-
-              mv /tmp/download input/dlc.rpf
-
+              cp /tmp/download input/dlc.rpf
             fi
-
           fi
-
-          # =========================
-          # Extract nested archives
-          # =========================
-
-          for pass in 1 2 3; do
-
-            echo "Extraction pass $pass"
-
-            find input -type f \
-              \( -iname "*.zip" -o -iname "*.rar" -o -iname "*.7z" \) \
-              -print0 > /tmp/archives.list
-
-            while IFS= read -r -d '' archive; do
-
-              echo "Extracting: $archive"
-
-              DESTINATION=$(dirname "$archive")
-
-              case "${archive,,}" in
-
-                *.zip)
-
-                  unzip -q -o "$archive" -d "$DESTINATION"
-
-                  ;;
-
-                *.rar)
-
-                  if ! 7z x -y "-o$DESTINATION" "$archive"; then
-
-                    unrar x -o+ -y "$archive" "$DESTINATION/"
-
-                  fi
-
-                  ;;
-
-                *.7z)
-
-                  7z x -y "-o$DESTINATION" "$archive"
-
-                  ;;
-
-              esac
-
-              rm -f "$archive"
-
-            done < /tmp/archives.list
-
-          done
-
-          echo "Final input files:"
-
-          find input -type f
-
-          test -n "$(find input -type f -print -quit)" || {
-            echo "ERROR: No input files found."
-            exit 1
-          }
-
-      # =========================
-      # Convert
-      # =========================
-
-      - name: Detect and convert
-        env:
-          NAME: ${{ inputs.name }}
-          MODE: ${{ inputs.mode }}
-          MERGE: ${{ inputs.merge }}
-
-        run: |
-          set -euo pipefail
-
-          cd ps4tool
-
-          echo "Conversion mode: $MODE"
-          echo "Output name: $NAME"
-
-          if [ "$MERGE" = "true" ]; then
-
-            python3 auto_convert.py \
-              ../input \
-              "$NAME" \
-              "$MODE" \
-              ../out \
-              --merge
-
+          if [ "$MODE" = "cars_dlc" ]; then
+            cp input/dlc.rpf "ps4tool/cars dlc.rpf One step/dlc.rpf"
           else
-
-            python3 auto_convert.py \
-              ../input \
-              "$NAME" \
-              "$MODE" \
-              ../out
-
+            find input -type f ! -name ".keep" -exec cp {} ps4tool/file_input/ \;
           fi
+          echo "== input files =="
+          ls -la ps4tool/file_input "ps4tool/cars dlc.rpf One step"
 
-      # =========================
-      # Verify output
-      # =========================
+      - name: Convert and build
+        env:
+          MODE: ${{ inputs.mode }}
+          NAME: ${{ inputs.name }}
+          WINEDEBUG: "-all"
+          PYTHONIOENCODING: utf-8
+        run: |
+          cd ps4tool
+          SAFE_NAME="${NAME//[^A-Za-z0-9_-]/_}"
+          [ -z "$SAFE_NAME" ] && SAFE_NAME=converted
+          if [ "$MODE" = "cars_dlc" ]; then
+            printf '2\n' | xvfb-run -a python3 7N-RL_One_IRAQ.py
+          else
+            printf '1\nN\nY\n%s\n' "$SAFE_NAME" | xvfb-run -a python3 7N-RL_One_IRAQ.py
+          fi
 
       - name: Check output
-        if: always()
         run: |
-          echo "Checking conversion output..."
+          find ps4tool/Finish -type f ! -name ".keep" | tee /tmp/out.txt
+          test -s /tmp/out.txt
 
-          mkdir -p out
-
-          find out -type f ! -name "info.txt" \
-            | tee /tmp/out.txt
-
-          if [ ! -s /tmp/out.txt ]; then
-
-            echo "ERROR: No converted files found."
-
-            exit 1
-
-          fi
-
-          echo "Conversion output found!"
-
-      # =========================
-      # Upload result
-      # =========================
-
-      - name: Upload converted files
-        if: always()
-        uses: actions/upload-artifact@v4
-
+      - uses: actions/upload-artifact@v4
         with:
           name: ps4-result
-          path: out/
-          if-no-files-found: warn
-          compression-level: 1
-          retention-days: 7
+          path: |
+            ps4tool/Finish
+            !ps4tool/Finish/.keep
+          if-no-files-found: error
