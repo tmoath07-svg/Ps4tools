@@ -1,0 +1,235 @@
+name: Zokii Studio - GTA V Toolkit
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "اختر الأداة"
+        required: true
+        type: choice
+        default: audit
+        options:
+          - audit
+          - convert_pc_to_ps4
+          - convert_and_build_rpf
+          - extract_ytd
+          - extract_rpf
+          - build_rpf
+      release_tag:
+        description: "Release Tag اختياري لتنزيل ملفات الإدخال"
+        required: false
+        type: string
+        default: ""
+      url:
+        description: "رابط مباشر لملف ZIP/RAR/7Z/RPF/YTD اختياري"
+        required: false
+        type: string
+        default: ""
+      input_folder:
+        description: "مجلد الإدخال داخل المستودع"
+        required: true
+        type: string
+        default: "input"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONIOENCODING: "utf-8"
+  WINEDEBUG: "-all"
+  WINEPREFIX: "${{ github.workspace }}/.wine"
+
+jobs:
+  run-toolkit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Locate and extract Zokii APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="Zokii Studio.apk"
+          if [ ! -f "$APK" ]; then
+            APK=$(find . -maxdepth 2 -type f \( -iname '*.apk' \) -print -quit)
+          fi
+          if [ -z "${APK:-}" ] || [ ! -f "$APK" ]; then
+            echo "ERROR: ضع ملف APK داخل جذر المستودع باسم Zokii Studio.apk"
+            exit 1
+          fi
+          mkdir -p .work/apk toolkit
+          python - "$APK" <<'PY'
+          import sys, zipfile
+          apk=sys.argv[1]
+          with zipfile.ZipFile(apk) as z:
+              bad=z.testzip()
+              if bad:
+                  raise SystemExit(f"APK archive is damaged at: {bad}")
+              z.extractall('.work/apk')
+          PY
+          test -f .work/apk/assets/oldtool/core_converter.py
+          test -f .work/apk/assets/oldtool/7N-RL_One_IRAQ.py
+          test -f .work/apk/assets/oldtool/RPFBuilder/extract_ytd.py
+          test -f .work/apk/assets/oldtool/RPFBuilder/extract_rpf.py
+          cp -a .work/apk/assets/oldtool/. toolkit/
+          echo "APK extracted and embedded tools staged."
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pycryptodome watchdog
+
+      - name: Install Wine and archive tools
+        if: ${{ inputs.mode == 'convert_pc_to_ps4' || inputs.mode == 'convert_and_build_rpf' || inputs.mode == 'build_rpf' }}
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends wine64 xvfb p7zip-full
+          (command -v wine || command -v wine64)
+          command -v xvfb-run
+          (command -v wineboot >/dev/null 2>&1 && WINEARCH=win64 wineboot -u) || true
+
+      - name: Download input files
+        env:
+          TAG: ${{ inputs.release_tag }}
+          URL: ${{ inputs.url }}
+          GH_TOKEN: ${{ github.token }}
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$INPUT_FOLDER"
+          if [ -n "$TAG" ]; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$INPUT_FOLDER" --clobber
+          fi
+          if [ -n "$URL" ]; then
+            name=$(python - "$URL" <<'PY'
+          import sys, urllib.parse, os
+          p=urllib.parse.urlparse(sys.argv[1]).path
+          print(os.path.basename(p) or 'download.bin')
+          PY
+          )
+            curl -fL --retry 3 --retry-delay 3 --connect-timeout 30 "$URL" -o "$INPUT_FOLDER/$name"
+          fi
+          # فك الأرشيفات المتداخلة على ثلاث مراحل، مع إبقاء الملفات الأصلية عند الفشل.
+          for pass in 1 2 3; do
+            while IFS= read -r -d '' archive; do
+              case "${archive,,}" in
+                *.zip|*.rar|*.7z)
+                  dest=$(dirname "$archive")
+                  mkdir -p "$dest"
+                  7z x -y "-o$dest" "$archive" >/dev/null
+                  rm -f "$archive"
+                  ;;
+              esac
+            done < <(find "$INPUT_FOLDER" -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) -print0)
+          done
+          if [ "${{ inputs.mode }}" != "audit" ] && [ -z "$(find "$INPUT_FOLDER" -type f -print -quit)" ]; then
+            echo "ERROR: ما فيه ملفات داخل $INPUT_FOLDER. ارفعها للمستودع أو مرر Release Tag/URL."
+            exit 1
+          fi
+
+      - name: Audit embedded Python tools
+        if: ${{ inputs.mode == 'audit' }}
+        run: |
+          set -euo pipefail
+          python -m compileall -q toolkit
+          python - <<'PY'
+          import ast, pathlib, hashlib, json
+          root=pathlib.Path('toolkit')
+          report=[]
+          for p in sorted(root.rglob('*.py')):
+              src=p.read_bytes()
+              tree=ast.parse(src, filename=str(p))
+              funcs=[]
+              for n in ast.walk(tree):
+                  if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)):
+                      funcs.append({'type':type(n).__name__,'name':n.name,'line':n.lineno})
+              report.append({'file':str(p),'bytes':len(src),'sha256':hashlib.sha256(src).hexdigest(),'symbols':funcs})
+          pathlib.Path('tool-audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(f"Validated {len(report)} Python files.")
+          for x in report: print(f"OK {x['file']} ({x['bytes']} bytes)")
+          PY
+
+      - name: Convert PC resources to PS4 resources
+        if: ${{ inputs.mode == 'convert_pc_to_ps4' || inputs.mode == 'convert_and_build_rpf' }}
+        env:
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$INPUT_FOLDER"
+          xvfb-run -a python toolkit/core_converter.py "$INPUT_FOLDER"
+          test -d "$INPUT_FOLDER/archive_input"
+          test -n "$(find "$INPUT_FOLDER/archive_input" -type f -print -quit)"
+
+      - name: Extract YTD textures to DDS
+        if: ${{ inputs.mode == 'extract_ytd' }}
+        env:
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+        run: |
+          set -euo pipefail
+          python toolkit/RPFBuilder/extract_ytd.py "$INPUT_FOLDER"
+
+      - name: Extract RPF archives
+        if: ${{ inputs.mode == 'extract_rpf' }}
+        env:
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' rpfs < <(find "$INPUT_FOLDER" -type f -iname '*.rpf' -print0)
+          if [ "${#rpfs[@]}" -eq 0 ]; then
+            echo "ERROR: لم أجد ملفات RPF."
+            exit 1
+          fi
+          for rpf in "${rpfs[@]}"; do
+            printf 'A\n' | python toolkit/RPFBuilder/extract_rpf.py "$rpf"
+          done
+
+      - name: Build RPF archive
+        if: ${{ inputs.mode == 'build_rpf' || inputs.mode == 'convert_and_build_rpf' }}
+        env:
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+        run: |
+          set -euo pipefail
+          SOURCE="$INPUT_FOLDER/archive_input"
+          if [ "${{ inputs.mode }}" = "build_rpf" ]; then SOURCE="$INPUT_FOLDER"; fi
+          test -d "$SOURCE"
+          xvfb-run -a python toolkit/RPFBuilder/build_rpf.py "$SOURCE"
+          test -s toolkit/RPFBuilder/Archive.rpf
+
+      - name: Collect results
+        if: always()
+        env:
+          INPUT_FOLDER: ${{ inputs.input_folder }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          mkdir -p result
+          cp -a toolkit result/toolkit
+          if [ -d "$INPUT_FOLDER" ]; then cp -a "$INPUT_FOLDER" result/input; fi
+          if [ -f toolkit/RPFBuilder/Archive.rpf ]; then cp toolkit/RPFBuilder/Archive.rpf result/Archive.rpf; fi
+          if [ -f tool-audit.json ]; then cp tool-audit.json result/; fi
+          printf 'mode=%s\n' "$MODE" > result/run-info.txt
+          find result -maxdepth 4 -type f -printf '%p (%s bytes)\n' | head -300 > result/file-list.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zokii-studio-${{ inputs.mode }}
+          path: result/
+          if-no-files-found: warn
+          compression-level: 1
+          retention-days: 7
