@@ -15,18 +15,23 @@ on:
           - extract_ytd
           - extract_rpf
           - build_rpf
+      toolkit_zip:
+        description: "اسم ZIP الأدوات المرفوع إلى جذر المستودع"
+        required: true
+        type: string
+        default: "ZokiiStudio-Toolkit.zip"
       release_tag:
-        description: "Release Tag اختياري لتنزيل ملفات الإدخال"
+        description: "Release Tag لملفات المود (اختياري)"
         required: false
         type: string
         default: ""
       url:
-        description: "رابط مباشر لملف ZIP/RAR/7Z/RPF/YTD اختياري"
+        description: "رابط مباشر لملف المود ZIP/RAR/7Z/RPF/YTD (اختياري)"
         required: false
         type: string
         default: ""
       input_folder:
-        description: "مجلد الإدخال داخل المستودع"
+        description: "مجلد ملفات المود داخل المستودع"
         required: true
         type: string
         default: "input"
@@ -54,34 +59,46 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Locate and extract Zokii APK
+      - name: Extract tools ZIP
+        env:
+          TOOLKIT_ZIP: ${{ inputs.toolkit_zip }}
         shell: bash
         run: |
           set -euo pipefail
-          APK="Zokii Studio.apk"
-          if [ ! -f "$APK" ]; then
-            APK=$(find . -maxdepth 2 -type f \( -iname '*.apk' \) -print -quit)
-          fi
-          if [ -z "${APK:-}" ] || [ ! -f "$APK" ]; then
-            echo "ERROR: ضع ملف APK داخل جذر المستودع باسم Zokii Studio.apk"
-            exit 1
-          fi
-          mkdir -p .work/apk toolkit
-          python - "$APK" <<'PY'
+          mkdir -p .work/bundle toolkit
+
+          if [ -d toolkit/RPFBuilder ] && [ -f toolkit/7N-RL_One_IRAQ.py ]; then
+            echo "Tool files already exist in toolkit/."
+          else
+            test -f "$TOOLKIT_ZIP" || {
+              echo "ERROR: لم أجد $TOOLKIT_ZIP في جذر المستودع. ارفع ZIP الأدوات بجانب مجلد .github."
+              exit 1
+            }
+            python - "$TOOLKIT_ZIP" <<'PY'
           import sys, zipfile
-          apk=sys.argv[1]
-          with zipfile.ZipFile(apk) as z:
-              bad=z.testzip()
+          from pathlib import Path
+          archive = Path(sys.argv[1])
+          with zipfile.ZipFile(archive) as z:
+              bad = z.testzip()
               if bad:
-                  raise SystemExit(f"APK archive is damaged at: {bad}")
-              z.extractall('.work/apk')
+                  raise SystemExit(f"ZIP تالف عند الملف: {bad}")
+              z.extractall('.work/bundle')
           PY
-          test -f .work/apk/assets/oldtool/core_converter.py
-          test -f .work/apk/assets/oldtool/7N-RL_One_IRAQ.py
-          test -f .work/apk/assets/oldtool/RPFBuilder/extract_ytd.py
-          test -f .work/apk/assets/oldtool/RPFBuilder/extract_rpf.py
-          cp -a .work/apk/assets/oldtool/. toolkit/
-          echo "APK extracted and embedded tools staged."
+            CORE=$(find .work/bundle -type f -name core_converter.py -print -quit)
+            test -n "$CORE" || { echo "ERROR: core_converter.py غير موجود داخل ZIP."; exit 1; }
+            TOOL_DIR=$(dirname "$CORE")
+            test -f "$TOOL_DIR/7N-RL_One_IRAQ.py"
+            test -d "$TOOL_DIR/RPFBuilder"
+            cp -a "$TOOL_DIR/." toolkit/
+          fi
+
+          test -f toolkit/core_converter.py
+          test -f toolkit/7N-RL_One_IRAQ.py
+          test -f toolkit/RPFBuilder/extract_ytd.py
+          test -f toolkit/RPFBuilder/extract_rpf.py
+          test -f toolkit/RPFBuilder/build_rpf.py
+          find toolkit -type d -name __pycache__ -prune -exec rm -rf {} +
+          echo "Tool files extracted successfully."
 
       - name: Install Python dependencies
         run: |
@@ -89,25 +106,22 @@ jobs:
           python -m pip install pycryptodome watchdog
 
       - name: Install Wine and archive tools
-        if: ${{ inputs.mode == 'convert_pc_to_ps4' || inputs.mode == 'convert_and_build_rpf' || inputs.mode == 'build_rpf' }}
-        timeout-minutes: 20
+        if: ${{ inputs.mode == 'convert_and_build_rpf' || inputs.mode == 'build_rpf' }}
+        timeout-minutes: 25
         run: |
           set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            --no-install-recommends wine64 xvfb p7zip-full
-          (command -v wine || command -v wine64)
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine64 xvfb p7zip-full
           command -v xvfb-run
+          (command -v wine || command -v wine64)
           (command -v wineboot >/dev/null 2>&1 && WINEARCH=win64 wineboot -u) || true
 
-      - name: Download input files
+      - name: Prepare mod input
         env:
           TAG: ${{ inputs.release_tag }}
           URL: ${{ inputs.url }}
-          GH_TOKEN: ${{ github.token }}
           INPUT_FOLDER: ${{ inputs.input_folder }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -118,64 +132,83 @@ jobs:
           if [ -n "$URL" ]; then
             name=$(python - "$URL" <<'PY'
           import sys, urllib.parse, os
-          p=urllib.parse.urlparse(sys.argv[1]).path
-          print(os.path.basename(p) or 'download.bin')
+          print(os.path.basename(urllib.parse.urlparse(sys.argv[1]).path) or 'download.bin')
           PY
           )
             curl -fL --retry 3 --retry-delay 3 --connect-timeout 30 "$URL" -o "$INPUT_FOLDER/$name"
           fi
-          # فك الأرشيفات المتداخلة على ثلاث مراحل، مع إبقاء الملفات الأصلية عند الفشل.
+          if [ "${{ inputs.mode }}" != "audit" ] && [ -z "$(find "$INPUT_FOLDER" -type f -print -quit)" ]; then
+            echo "ERROR: مجلد $INPUT_FOLDER فارغ. ارفع ملفات المود داخله أو استخدم Release Tag/URL."
+            exit 1
+          fi
+          # فك ZIP/RAR/7Z المتداخلة، مع عدم حذف الأرشيف الأصلي عند فشل الفك.
           for pass in 1 2 3; do
             while IFS= read -r -d '' archive; do
+              dest=$(dirname "$archive")
               case "${archive,,}" in
                 *.zip|*.rar|*.7z)
-                  dest=$(dirname "$archive")
-                  mkdir -p "$dest"
-                  7z x -y "-o$dest" "$archive" >/dev/null
-                  rm -f "$archive"
+                  if 7z x -y "-o$dest" "$archive" >/dev/null; then
+                    rm -f "$archive"
+                  else
+                    echo "WARNING: تعذر فك $archive، تم الاحتفاظ به."
+                  fi
                   ;;
               esac
             done < <(find "$INPUT_FOLDER" -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) -print0)
           done
-          if [ "${{ inputs.mode }}" != "audit" ] && [ -z "$(find "$INPUT_FOLDER" -type f -print -quit)" ]; then
-            echo "ERROR: ما فيه ملفات داخل $INPUT_FOLDER. ارفعها للمستودع أو مرر Release Tag/URL."
-            exit 1
-          fi
 
-      - name: Audit embedded Python tools
+      - name: Audit Python tools
         if: ${{ inputs.mode == 'audit' }}
         run: |
           set -euo pipefail
           python -m compileall -q toolkit
           python - <<'PY'
-          import ast, pathlib, hashlib, json
-          root=pathlib.Path('toolkit')
-          report=[]
+          import ast, hashlib, json
+          from pathlib import Path
+          root = Path('toolkit')
+          report = []
           for p in sorted(root.rglob('*.py')):
-              src=p.read_bytes()
-              tree=ast.parse(src, filename=str(p))
-              funcs=[]
-              for n in ast.walk(tree):
-                  if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)):
-                      funcs.append({'type':type(n).__name__,'name':n.name,'line':n.lineno})
-              report.append({'file':str(p),'bytes':len(src),'sha256':hashlib.sha256(src).hexdigest(),'symbols':funcs})
-          pathlib.Path('tool-audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
-          print(f"Validated {len(report)} Python files.")
-          for x in report: print(f"OK {x['file']} ({x['bytes']} bytes)")
+              source = p.read_bytes()
+              tree = ast.parse(source, filename=str(p))
+              symbols = [
+                  {'kind': type(n).__name__, 'name': n.name, 'line': n.lineno}
+                  for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+              ]
+              report.append({'file': str(p), 'bytes': len(source), 'sha256': hashlib.sha256(source).hexdigest(), 'symbols': symbols})
+          Path('tool-audit.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+          print(f'Validated {len(report)} Python files.')
+          for item in report:
+              print(f"OK {item['file']} ({item['bytes']} bytes)")
           PY
 
-      - name: Convert PC resources to PS4 resources
+      - name: Convert PC files to PS4 format
         if: ${{ inputs.mode == 'convert_pc_to_ps4' || inputs.mode == 'convert_and_build_rpf' }}
         env:
           INPUT_FOLDER: ${{ inputs.input_folder }}
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$INPUT_FOLDER"
-          xvfb-run -a python toolkit/core_converter.py "$INPUT_FOLDER"
-          test -d "$INPUT_FOLDER/archive_input"
-          test -n "$(find "$INPUT_FOLDER/archive_input" -type f -print -quit)"
+          mkdir -p toolkit/file_input
+          while IFS= read -r -d '' file; do
+            case "${file,,}" in
+              *.yft|*.ydr|*.ydd|*.ytd|*.ybn|*.ycd|*.ymap|*.ytyp|*.ypt|*.ymt|*.yld|*.yed)
+                cp -f "$file" toolkit/file_input/ ;;
+            esac
+          done < <(find "$INPUT_FOLDER" -type f -print0)
+          if [ -z "$(find toolkit/file_input -maxdepth 1 -type f -print -quit)" ]; then
+            echo "ERROR: ما لقيت ملفات GTA قابلة للتحويل داخل $INPUT_FOLDER."
+            exit 1
+          fi
+          # القائمة الافتراضية في أداة 7N هي التحويل العادي؛ نرفض حذف الملفات الأصلية ونرفض البناء التفاعلي هنا.
+          printf '\nN\nN\n' | python toolkit/7N-RL_One_IRAQ.py
+          test -d toolkit/file_input/archive_input
+          test -n "$(find toolkit/file_input/archive_input -type f -print -quit)" || {
+            echo "ERROR: لم ينتج المحول ملفات داخل archive_input."
+            exit 1
+          }
 
-      - name: Extract YTD textures to DDS
+      - name: Extract YTD textures
         if: ${{ inputs.mode == 'extract_ytd' }}
         env:
           INPUT_FOLDER: ${{ inputs.input_folder }}
@@ -187,25 +220,30 @@ jobs:
         if: ${{ inputs.mode == 'extract_rpf' }}
         env:
           INPUT_FOLDER: ${{ inputs.input_folder }}
+        shell: bash
         run: |
           set -euo pipefail
           mapfile -d '' rpfs < <(find "$INPUT_FOLDER" -type f -iname '*.rpf' -print0)
           if [ "${#rpfs[@]}" -eq 0 ]; then
-            echo "ERROR: لم أجد ملفات RPF."
+            echo "ERROR: ما لقيت ملفات RPF."
             exit 1
           fi
           for rpf in "${rpfs[@]}"; do
-            printf 'A\n' | python toolkit/RPFBuilder/extract_rpf.py "$rpf"
+            python toolkit/RPFBuilder/extract_rpf.py "$rpf" "${rpf%.*}_extracted"
           done
 
       - name: Build RPF archive
         if: ${{ inputs.mode == 'build_rpf' || inputs.mode == 'convert_and_build_rpf' }}
         env:
           INPUT_FOLDER: ${{ inputs.input_folder }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
-          SOURCE="$INPUT_FOLDER/archive_input"
-          if [ "${{ inputs.mode }}" = "build_rpf" ]; then SOURCE="$INPUT_FOLDER"; fi
+          if [ "$MODE" = "convert_and_build_rpf" ]; then
+            SOURCE="toolkit/file_input/archive_input"
+          else
+            SOURCE="$INPUT_FOLDER"
+          fi
           test -d "$SOURCE"
           xvfb-run -a python toolkit/RPFBuilder/build_rpf.py "$SOURCE"
           test -s toolkit/RPFBuilder/Archive.rpf
@@ -216,13 +254,21 @@ jobs:
           INPUT_FOLDER: ${{ inputs.input_folder }}
           MODE: ${{ inputs.mode }}
         run: |
+          set -euo pipefail
           mkdir -p result
-          cp -a toolkit result/toolkit
-          if [ -d "$INPUT_FOLDER" ]; then cp -a "$INPUT_FOLDER" result/input; fi
-          if [ -f toolkit/RPFBuilder/Archive.rpf ]; then cp toolkit/RPFBuilder/Archive.rpf result/Archive.rpf; fi
+          if [ -d toolkit/file_input/archive_input ]; then
+            cp -a toolkit/file_input/archive_input result/converted_files
+          fi
+          if [ -f toolkit/RPFBuilder/Archive.rpf ]; then
+            cp toolkit/RPFBuilder/Archive.rpf result/Archive.rpf
+          fi
+          if [ -d "$INPUT_FOLDER" ]; then
+            mkdir -p result/input
+            find "$INPUT_FOLDER" -type f -print | head -200 > result/input-file-list.txt || true
+          fi
           if [ -f tool-audit.json ]; then cp tool-audit.json result/; fi
           printf 'mode=%s\n' "$MODE" > result/run-info.txt
-          find result -maxdepth 4 -type f -printf '%p (%s bytes)\n' | head -300 > result/file-list.txt
+          find result -type f -printf '%p (%s bytes)\n' | head -300 > result/file-list.txt
 
       - name: Upload results
         if: always()
