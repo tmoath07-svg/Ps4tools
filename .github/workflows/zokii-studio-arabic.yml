@@ -1,0 +1,214 @@
+name: Zokii Studio - تحويل مود سيارة إلى PS4
+
+on:
+  workflow_dispatch:
+    inputs:
+      mod_folder:
+        description: "اسم مجلد المود داخل المستودع (مثال: input)"
+        required: true
+        type: string
+        default: "input"
+      spawn_name:
+        description: "اسم سباون السيارة داخل GTA (بالإنجليزي، مثال: landcruiser)"
+        required: true
+        type: string
+        default: "buccaneer2"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONIOENCODING: "utf-8"
+  WINEDEBUG: "-all"
+  WINEPREFIX: "${{ github.workspace }}/.wine"
+  ZOKII_VRAM_OVER_LIMIT: "skip"
+
+jobs:
+  run-toolkit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: جلب ملفات المستودع
+        uses: actions/checkout@v4
+
+      - name: تجهيز بايثون
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: فك حزمة الأدوات
+        env:
+          TOOLKIT_ZIP: ZokiiStudio-Toolkit-FIXED.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .work/bundle toolkit
+          if [ -f toolkit/core_converter.py ] && [ -d toolkit/RPFBuilder ]; then
+            echo "Tool files already exist in toolkit/."
+          else
+            test -f "$TOOLKIT_ZIP" || {
+              echo "ERROR: لم أجد $TOOLKIT_ZIP في جذر المستودع."
+              exit 1
+            }
+            python - "$TOOLKIT_ZIP" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          archive = Path(sys.argv[1])
+          with zipfile.ZipFile(archive) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit(f"ZIP تالف عند الملف: {bad}")
+              z.extractall(".work/bundle")
+          PY
+            CORE="$(find .work/bundle -type f -name core_converter.py -print -quit)"
+            test -n "$CORE" || { echo "ERROR: core_converter.py غير موجود داخل ZIP."; exit 1; }
+            TOOL_DIR="$(dirname "$CORE")"
+            test -f "$TOOL_DIR/7N-RL_One_IRAQ.py"
+            test -d "$TOOL_DIR/RPFBuilder"
+            cp -a "$TOOL_DIR/." toolkit/
+          fi
+          test -f toolkit/7N-RL_One_IRAQ.py
+          test -f toolkit/core_converter.py
+          test -f toolkit/ragebuilder.exe
+          test -f toolkit/texture_builder.lua
+          test -f toolkit/RPFBuilder/extract_ytd.py
+          test -f toolkit/RPFBuilder/extract_rpf.py
+          test -f toolkit/RPFBuilder/build_rpf.py
+          find toolkit -type d -name __pycache__ -prune -exec rm -rf {} +
+          echo "Tool files extracted and required paths verified."
+
+      - name: تثبيت مكتبات بايثون
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pycryptodome watchdog
+
+      - name: تثبيت أدوات فك الضغط وتشغيل أدوات ويندوز
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends p7zip-full
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine64 xvfb
+          command -v wine64
+          command -v xvfb-run
+          mkdir -p "$WINEPREFIX"
+          WINEARCH=win64 xvfb-run -a wine64 --version
+          7z | sed -n '1,2p'
+
+      - name: تجهيز ملفات المود
+        env:
+          INPUT_FOLDER: ${{ inputs.mod_folder }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$INPUT_FOLDER" || {
+            echo "ERROR: مجلد المود غير موجود: $INPUT_FOLDER"
+            exit 1
+          }
+          for pass in 1 2 3; do
+            while IFS= read -r -d '' archive; do
+              dest="$(dirname "$archive")"
+              echo "فك الضغط: $archive"
+              7z x -y "-o$dest" "$archive" >/dev/null
+              rm -f "$archive"
+            done < <(find "$INPUT_FOLDER" -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) -print0)
+          done
+          if [ -z "$(find "$INPUT_FOLDER" -type f -print -quit)" ]; then
+            echo "ERROR: مجلد المود فارغ. ارفع ملفات السيارة داخله."
+            exit 1
+          fi
+          echo "الملفات الجاهزة للتحويل:"
+          find "$INPUT_FOLDER" -type f | head -300
+
+      - name: فحص ملفات الأدوات قبل التحويل
+        run: |
+          set -euo pipefail
+          python -m compileall -q toolkit
+          python - <<'PY'
+          import ast, hashlib, json
+          from pathlib import Path
+          root = Path("toolkit")
+          report = []
+          for p in sorted(root.rglob("*.py")):
+              source = p.read_bytes()
+              tree = ast.parse(source, filename=str(p))
+              symbols = [
+                  {"kind": type(n).__name__, "name": n.name, "line": n.lineno}
+                  for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+              ]
+              report.append({
+                  "file": str(p),
+                  "bytes": len(source),
+                  "sha256": hashlib.sha256(source).hexdigest(),
+                  "symbols": symbols
+              })
+          Path("tool-audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+          print(f"Validated {len(report)} Python files.")
+          for item in report:
+              print(f"OK {item['file']} ({item['bytes']} bytes)")
+          PY
+
+      - name: تحويل السيارة وبناء DLC للسوني
+        env:
+          INPUT_FOLDER: ${{ inputs.mod_folder }}
+          SPAWN_NAME: ${{ inputs.spawn_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="toolkit/vehicles to dlc.rpf/mod_input"
+          mkdir -p "$TARGET"
+          cp -a "$INPUT_FOLDER/." "$TARGET/"
+          # Menu option 4 builds a full replacement-vehicle DLC. The next line
+          # supplies the spawn name requested by vehicles_to_dlc_rpf().
+          printf '4\n%s\n' "$SPAWN_NAME" | xvfb-run -a python toolkit/7N-RL_One_IRAQ.py
+          test -s "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" || {
+            echo "ERROR: لم يتم إنشاء DLC. راجع سجل بناء السيارة والتحويل."
+            exit 1
+          }
+
+      - name: جمع ملفات النتيجة
+        if: always()
+        env:
+          INPUT_FOLDER: ${{ inputs.mod_folder }}
+          MODE: vehicle_to_dlc
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result
+          if [ -d toolkit/file_input/archive_input ]; then
+            cp -a toolkit/file_input/archive_input result/converted_files
+          fi
+          if [ -f toolkit/RPFBuilder/Archive.rpf ]; then
+            cp toolkit/RPFBuilder/Archive.rpf result/Archive.rpf
+          fi
+          if [ -f "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" ]; then
+            cp "toolkit/vehicles to dlc.rpf/Finish/dlc.rpf" result/dlc.rpf
+          fi
+          if [ -f conversion-report.tsv ]; then
+            cp conversion-report.tsv result/
+          fi
+          if [ -d "toolkit/Conversion failed ❌" ]; then
+            cp -a "toolkit/Conversion failed ❌" result/
+          fi
+          if [ -d "$INPUT_FOLDER" ]; then
+            mkdir -p result/input-and-extracted
+            cp -a "$INPUT_FOLDER/." result/input-and-extracted/
+          fi
+          if [ -f tool-audit.json ]; then cp tool-audit.json result/; fi
+          printf 'mode=%s\n' "$MODE" > result/run-info.txt
+          find result -type f -printf '%p (%s bytes)\n' | head -500 > result/file-list.txt
+
+      - name: رفع النتيجة كملف قابل للتنزيل
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zokii-studio-ps4-dlc
+          path: result/
+          if-no-files-found: warn
+          compression-level: 1
+          retention-days: 7
