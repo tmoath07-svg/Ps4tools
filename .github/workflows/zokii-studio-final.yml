@@ -121,14 +121,22 @@ jobs:
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends p7zip-full
+          command -v 7z
+          7z i >/dev/null
           if [[ "${{ inputs.mode }}" == "convert_pc_to_ps4" || "${{ inputs.mode }}" == "vehicle_to_dlc" || "${{ inputs.mode }}" == "convert_and_build_rpf" || "${{ inputs.mode }}" == "build_rpf" ]]; then
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine64 xvfb
+            # Install both Wine launchers and 32-bit support. Some bundled EXE tools
+            # are 32-bit and the plain 'wine' command is required by Python scripts.
+            sudo dpkg --add-architecture i386
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wine wine64 wine32:i386 xvfb fonts-wine
+            command -v wine
             command -v wine64
             command -v xvfb-run
             mkdir -p "$WINEPREFIX"
-            WINEARCH=win64 xvfb-run -a wine64 --version
+            export WINEARCH=win64
+            xvfb-run -a wineboot --init
+            xvfb-run -a wine --version
           fi
-          7z | sed -n '1,2p'
 
       - name: Prepare mod input
         if: ${{ inputs.mode != 'audit' }}
@@ -171,7 +179,7 @@ jobs:
             done < <(find "$INPUT_FOLDER" -type f \( -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) -print0)
           done
           echo "Input files:"
-          find "$INPUT_FOLDER" -type f | head -300
+          find "$INPUT_FOLDER" -type f -print | sed -n '1,300p'
 
       - name: Audit Python tools
         if: ${{ inputs.mode == 'audit' }}
@@ -251,8 +259,8 @@ jobs:
               target = dest / p.name
               if target.name.lower() in seen:
                   raise SystemExit(
-                      f"ERROR: اسم ملف مكرر بعد التسطيح: {p.name}\\n"
-                      f"الأول: {seen[target.name.lower()]}\\nالثاني: {p}"
+                      f"ERROR: اسم ملف مكرر بعد التسطيح: {p.name}\n"
+                      f"الأول: {seen[target.name.lower()]}\nالثاني: {p}"
                   )
               seen[target.name.lower()] = str(p)
               shutil.copy2(p, target)
@@ -279,15 +287,15 @@ jobs:
               ".ymap": ".omap", ".ytyp": ".otyp", ".ymt": ".omt",
               ".ymf": ".omf", ".ytd": ".otd"
           }
-          lines = ["source\\texpected_output\\tstatus"]
+          lines = ["source\texpected_output\tstatus"]
           for p in sorted(src.iterdir()):
               if not p.is_file() or p.suffix.lower() not in mapping:
                   continue
               target = out / (p.stem + mapping[p.suffix.lower()])
               status = "OK" if target.is_file() and target.stat().st_size else "MISSING_OR_FAILED"
-              lines.append(f"{p.name}\\t{target.name}\\t{status}")
-          Path("conversion-report.tsv").write_text("\\n".join(lines) + "\\n")
-          print("\\n".join(lines))
+              lines.append(f"{p.name}\t{target.name}\t{status}")
+          Path("conversion-report.tsv").write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
           PY
 
       - name: Extract YTD textures
@@ -361,7 +369,7 @@ jobs:
           fi
           if [ -f tool-audit.json ]; then cp tool-audit.json result/; fi
           printf 'mode=%s\n' "$MODE" > result/run-info.txt
-          find result -type f -printf '%p (%s bytes)\n' | head -500 > result/file-list.txt
+          find result -type f -printf '%p (%s bytes)\n' | sed -n '1,500p' > result/file-list.txt
 
       - name: Upload results
         if: always()
