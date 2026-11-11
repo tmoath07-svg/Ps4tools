@@ -3,20 +3,20 @@ on:
   workflow_dispatch:
     inputs:
       name:
-        description: "اسم المجلد (English)"
+        description: "اسم المجلد (انجليزي بدون مسافات)"
         required: true
         default: converted
         type: string
       release_tag:
-        description: "Release Tag"
+        description: "اسم الـ Release Tag (اختياري)"
         required: false
         default: ""
         type: string
       mode:
-        description: "Conversion mode"
+        description: "Conversion Mode"
         required: true
-        default: auto
         type: choice
+        default: auto
         options:
           - auto
           - cars
@@ -26,28 +26,65 @@ on:
           - files
           - fivem_map
       merge:
-        description: "Merge exactly 5 vehicles"
-        required: true
+        description: "دمج السيارات"
+        required: false
         default: false
         type: boolean
       url:
-        description: "Direct download URL"
+        description: "رابط تحميل مباشر (اختياري)"
         required: false
         default: ""
         type: string
+permissions:
+  contents: read
 jobs:
   convert:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
-    permissions:
-      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Install dependencies
+      # =========================
+      # Install dependencies
+      # =========================
+      - name: Fix Ubuntu mirrors
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          set -e
+          echo "Fixing Ubuntu mirrors..."
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i \
+              's/azure.archive.ubuntu.com/archive.ubuntu.com/g' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i \
+              's/azure.archive.ubuntu.com/archive.ubuntu.com/g' \
+              /etc/apt/sources.list
+          fi
+      - name: Install tools
+        timeout-minutes: 20
+        run: |
+          set -e
+          echo "Updating package lists..."
+          UPDATED=0
+          for attempt in 1 2 3; do
+            if sudo apt-get update \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 \
+              -o Acquire::https::Timeout=30; then
+              UPDATED=1
+              break
+            fi
+            echo "Update attempt $attempt failed."
+            sleep 10
+          done
+          if [ "$UPDATED" -ne 1 ]; then
+            echo "APT update failed."
+            exit 1
+          fi
+          echo "Installing dependencies..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends \
             wine \
             wine64 \
             xvfb \
@@ -58,120 +95,155 @@ jobs:
             python3-pip \
             curl \
             file
-          python3 -m pip install --break-system-packages \
-            pycryptodome watchdog
-      - name: Initialize Wine
+          echo "Installing Python libraries..."
+          python3 -m pip install --no-cache-dir \
+            pycryptodome \
+            watchdog
+          echo "Dependencies installed successfully!"
+      # =========================
+      # Prepare converter
+      # =========================
+      - name: Unpack tool
         run: |
-          export WINEDEBUG=-all
-          export WINEPREFIX="$HOME/.wine"
-          wineboot --init
-          sleep 5
-      - name: Extract PS4 tool
-        run: |
+          set -e
+          test -f auto_convert.py || {
+            echo "auto_convert.py is missing from repository root"
+            exit 1
+          }
           test -f ps4tool.zip || {
-            echo "::error::ps4tool.zip not found"
+            echo "ps4tool.zip is missing from repository root"
             exit 1
           }
-          unzip -q ps4tool.zip -d ps4tool
-          test -f ps4tool/7N-RL_One_IRAQ.py || {
-            echo "::error::7N-RL tool not found"
-            exit 1
-          }
+          mkdir -p ps4tool
+          unzip -q -o ps4tool.zip -d ps4tool
+          if [ ! -f ps4tool/7N-RL_One_IRAQ.py ] && \
+             [ -d ps4tool/ps4tool ]; then
+            cp -a ps4tool/ps4tool/. ps4tool/
+          fi
           cp auto_convert.py ps4tool/auto_convert.py
-          mkdir -p input out
-      - name: Download mod
+          mkdir -p \
+            ps4tool/file_input \
+            ps4tool/Finish \
+            input \
+            out
+          echo "Tool prepared successfully."
+      # =========================
+      # Download input
+      # =========================
+      - name: Gather input files
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
           URL: ${{ inputs.url }}
+          TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           mkdir -p input
           if [ -n "$TAG" ]; then
+            echo "Downloading release: $TAG"
             gh release download "$TAG" \
               --repo "${GITHUB_REPOSITORY}" \
               --dir input \
               --clobber
           fi
           if [ -n "$URL" ]; then
-            curl -L --fail --retry 3 \
-              "$URL" \
-              -o /tmp/mod_download
-          
-            filename=$(basename "${URL%%\?*}")
-            if [ -z "$filename" ] || [ "$filename" = "/" ]; then
-              filename="download"
+            echo "Downloading URL..."
+            curl -L \
+              --fail \
+              --retry 3 \
+              --retry-delay 5 \
+              --connect-timeout 30 \
+              -o /tmp/download \
+              "$URL"
+            if 7z t /tmp/download >/dev/null 2>&1; then
+              FILE_TYPE=$(file -b /tmp/download)
+              if echo "$FILE_TYPE" | grep -qi "RAR"; then
+                mv /tmp/download input/download.rar
+              elif echo "$FILE_TYPE" | grep -qi "Zip"; then
+                mv /tmp/download input/download.zip
+              else
+                mv /tmp/download input/download.7z
+              fi
+            else
+              cp /tmp/download input/dlc.rpf
             fi
-            cp /tmp/mod_download "input/$filename"
           fi
-          if [ -z "$(find input -type f -print -quit)" ]; then
-            echo "::error::No mod files downloaded"
-            exit 1
-          fi
-      - name: Extract archives
-        run: |
-          set -e
-          mkdir -p /tmp/extract
+          # Extract nested archives
           for pass in 1 2 3; do
-            find input -type f -print0 |
+            echo "Extraction pass $pass"
+            find input -type f \
+              \( -iname "*.zip" -o -iname "*.rar" -o -iname "*.7z" \) \
+              -print0 |
             while IFS= read -r -d '' archive; do
-              case "${archive,,}" in
-                *.zip|*.7z|*.rar)
-                  echo "Extracting: $archive"
-                  mkdir -p /tmp/extract/current
-                  if [[ "${archive,,}" == *.zip ]]; then
-                    unzip -oq "$archive" \
-                      -d /tmp/extract/current
-                  else
-                    7z x -y \
-                      "-o/tmp/extract/current" \
-                      "$archive" || {
-                        echo "::warning::Archive extraction failed: $archive"
-                        rm -rf /tmp/extract/current
-                        continue
-                      }
-                  fi
-                  cp -a /tmp/extract/current/. input/
-                  rm -rf /tmp/extract/current
-                  rm -f "$archive"
+              echo "Extracting: $archive"
+              case "$archive" in
+                *.zip|*.ZIP)
+                  unzip -q -o "$archive" -d "$(dirname "$archive")"
+                  ;;
+                *)
+                  7z x -y "-o$(dirname "$archive")" "$archive" \
+                    || unrar x -o+ -y "$archive" "$(dirname "$archive")/"
                   ;;
               esac
+              rm -f "$archive"
             done
           done
           echo "Input files:"
-          find input -type f | head -100
+          find input -type f
+          test -n "$(find input -type f -print -quit)" || {
+            echo "No input files found!"
+            exit 1
+          }
+      # =========================
+      # Convert
+      # =========================
       - name: Detect and convert
-        id: convert
         env:
           NAME: ${{ inputs.name }}
           MODE: ${{ inputs.mode }}
           MERGE: ${{ inputs.merge }}
-          TOOL_TIMEOUT: 5400
         run: |
+          set -e
           cd ps4tool
-          python3 -m py_compile auto_convert.py
-          python3 auto_convert.py \
-            ../input \
-            "$NAME" \
-            "$MODE" \
-            ../out \
-            --merge "$MERGE"
+          echo "Conversion mode: $MODE"
+          echo "Output name: $NAME"
+          if [ "$MERGE" = "true" ]; then
+            python3 auto_convert.py \
+              ../input \
+              "$NAME" \
+              "$MODE" \
+              ../out \
+              --merge
+          else
+            python3 auto_convert.py \
+              ../input \
+              "$NAME" \
+              "$MODE" \
+              ../out
+          fi
+      # =========================
+      # Verify output
+      # =========================
       - name: Check output
         if: always()
         run: |
-          echo "Conversion results:"
-          if [ -d out ]; then
-            find out -type f -printf '%p (%s bytes)\n'
+          echo "Checking conversion output..."
+          mkdir -p out
+          find out -type f ! -name "info.txt" \
+            | tee /tmp/out.txt
+          if [ ! -s /tmp/out.txt ]; then
+            echo "No converted files found."
+            exit 1
           fi
-          if [ -f out/info.txt ]; then
-            echo "Conversion log:"
-            cat out/info.txt
-          fi
-      - name: Upload conversion results
+          echo "Conversion output found!"
+      # =========================
+      # Upload result
+      # =========================
+      - name: Upload converted files
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ps4-result
           path: out/
           if-no-files-found: warn
+          compression-level: 1
           retention-days: 7
