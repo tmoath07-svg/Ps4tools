@@ -45,61 +45,47 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       # =========================
-      # Install dependencies
+      # Configure Ubuntu mirrors
       # =========================
-      - name: Fix Ubuntu mirrors
+      - name: Configure Ubuntu mirrors
         run: |
           set -e
-          echo "Fixing Ubuntu mirrors..."
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i \
-              's/azure.archive.ubuntu.com/archive.ubuntu.com/g' \
-              /etc/apt/apt-mirrors.txt
-          fi
-          if [ -f /etc/apt/sources.list ]; then
-            sudo sed -i \
-              's/azure.archive.ubuntu.com/archive.ubuntu.com/g' \
-              /etc/apt/sources.list
-          fi
+          echo "Configuring Ubuntu mirrors..."
+          sudo tee /etc/apt/apt-mirrors.txt > /dev/null <<'EOF'
+          https://mirrors.edge.kernel.org/ubuntu/ priority:1
+          http://archive.ubuntu.com/ubuntu/ priority:2
+          http://azure.archive.ubuntu.com/ubuntu/ priority:3
+          EOF
+          sudo tee /etc/apt/apt.conf.d/99-ci-network > /dev/null <<'EOF'
+          Acquire::Retries "1";
+          Acquire::http::Timeout "20";
+          Acquire::https::Timeout "20";
+          EOF
+      # =========================
+      # Install dependencies
+      # =========================
       - name: Install tools
-        timeout-minutes: 20
+        timeout-minutes: 15
         run: |
           set -e
           echo "Updating package lists..."
-          UPDATED=0
-          for attempt in 1 2 3; do
-            if sudo apt-get update \
-              -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=30 \
-              -o Acquire::https::Timeout=30; then
-              UPDATED=1
-              break
-            fi
-            echo "Update attempt $attempt failed."
-            sleep 10
-          done
-          if [ "$UPDATED" -ne 1 ]; then
-            echo "APT update failed."
-            exit 1
-          fi
-          echo "Installing dependencies..."
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            --no-install-recommends \
+          timeout 180 sudo apt-get update
+          echo "Checking preinstalled tools..."
+          command -v python3
+          command -v 7z
+          command -v unzip
+          command -v xvfb-run
+          echo "Installing Wine and RAR support..."
+          timeout 600 sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends \
             wine \
             wine64 \
-            xvfb \
-            unzip \
-            p7zip-full \
-            unrar \
-            python3 \
-            python3-pip \
-            curl \
-            file
+            unrar
           echo "Installing Python libraries..."
-          python3 -m pip install --no-cache-dir \
+          python3 -m pip install --user --no-cache-dir \
             pycryptodome \
             watchdog
-          echo "Dependencies installed successfully!"
+          echo "All tools are ready!"
       # =========================
       # Prepare converter
       # =========================
@@ -154,20 +140,21 @@ jobs:
               --connect-timeout 30 \
               -o /tmp/download \
               "$URL"
-            if 7z t /tmp/download >/dev/null 2>&1; then
-              FILE_TYPE=$(file -b /tmp/download)
-              if echo "$FILE_TYPE" | grep -qi "RAR"; then
-                mv /tmp/download input/download.rar
-              elif echo "$FILE_TYPE" | grep -qi "Zip"; then
-                mv /tmp/download input/download.zip
-              else
-                mv /tmp/download input/download.7z
-              fi
+            FILE_TYPE=$(file -b /tmp/download)
+            echo "Detected file: $FILE_TYPE"
+            if echo "$FILE_TYPE" | grep -qi "RAR"; then
+              mv /tmp/download input/download.rar
+            elif echo "$FILE_TYPE" | grep -qi "Zip"; then
+              mv /tmp/download input/download.zip
+            elif echo "$FILE_TYPE" | grep -Eqi "7-zip|7z archive"; then
+              mv /tmp/download input/download.7z
             else
               cp /tmp/download input/dlc.rpf
             fi
           fi
+          # =========================
           # Extract nested archives
+          # =========================
           for pass in 1 2 3; do
             echo "Extraction pass $pass"
             find input -type f \
