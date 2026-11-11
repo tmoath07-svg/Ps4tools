@@ -290,8 +290,11 @@ jobs:
                   raise RuntimeError('No vehicle subfolders with .yft files were found inside stream/.')
               if len(vehicle_dirs) > 12:
                   raise RuntimeError(f'Found {len(vehicle_dirs)} vehicle folders. Safety limit for one pack is 12.')
-          
-                  resource_label = resource.name
+
+              # Always initialize the DLC label after resource discovery.
+              # The previous indentation placed this assignment inside the
+              # error-only branch above, leaving resource_label undefined.
+              resource_label = resource.name
               if resource_label.lower() in {'input', 'mod', 'resource', 'resources'}:
                   resource_label = vehicle_dirs[0].name
               dlc_name = z._sanitize_vehicle_name(resource_label)
