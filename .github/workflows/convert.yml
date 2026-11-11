@@ -7,11 +7,11 @@ on:
         description: "اسم المجلد (انجليزي بدون مسافات)"
         default: converted
       release_tag:
-        description: "اسم الـ Release (Tag) اللي رفعت فيه الملفات"
+        description: "اسم الـ Release (Tag)"
         required: false
         default: ""
       mode:
-        description: "النوع (خله auto ويكتشفه بنفسه)"
+        description: "النوع (خله auto)"
         type: choice
         default: auto
         options:
@@ -43,7 +43,9 @@ jobs:
 
       - name: Unpack tool
         run: |
+          test -f auto_convert.py || { echo "auto_convert.py is missing from the repo root"; exit 1; }
           unzip -q ps4tool.zip
+          cp auto_convert.py ps4tool/auto_convert.py
           mkdir -p ps4tool/file_input ps4tool/Finish
 
       - name: Gather input files
@@ -74,7 +76,6 @@ jobs:
               rm -f "$a"
             done
           done
-          echo "== input files =="
           find input -type f ! -name ".keep" | head -50
 
       - name: Detect and convert
@@ -82,55 +83,17 @@ jobs:
           NAME: ${{ inputs.name }}
           MODE: ${{ inputs.mode }}
         run: |
-          cat > ps4tool/auto_convert.py <<'PYEOF'
-          import os, re, sys, shutil, subprocess, tempfile
-          from pathlib import Path
+          cd ps4tool
+          python3 auto_convert.py ../input "$NAME" "$MODE" ../out
 
-          ROOT = Path(__file__).resolve().parent
-          SRC = Path(sys.argv[1]).resolve()
-          NAME = re.sub(r'[^A-Za-z0-9_-]', '_', sys.argv[2]) or 'converted'
-          FORCE = (sys.argv[3] if len(sys.argv) > 3 else 'auto').strip() or 'auto'
-          OUT = Path(sys.argv[4]).resolve()
-          DRY = os.environ.get('DRY_RUN') == '1'
-          NAME_CHAR = NAME.replace('-', '_')
+      - name: Check output
+        run: |
+          find out -type f ! -name info.txt | tee /tmp/out.txt
+          test -s /tmp/out.txt
 
-          OUT.mkdir(parents=True, exist_ok=True)
-          log_lines = []
-          def log(msg):
-              print(msg, flush=True)
-              log_lines.append(msg)
-
-          def listing(root):
-              return [p for p in Path(root).rglob('*') if p.is_file() and p.name != '.keep']
-
-          def exts(files):
-              return {p.suffix.lower() for p in files}
-
-          def names(files):
-              return {p.name.lower() for p in files}
-
-          def classify(files):
-              e, n = exts(files), names(files)
-              if '.ydd' in e or 'peds.meta' in n:
-                  return 'character'
-              if '.yft' in e or 'vehicles.meta' in n or 'carvariations.meta' in n:
-                  return 'cars'
-              if e & {'.ymap', '.ytyp', '.ybn', '.ynv'}:
-                  return 'map'
-              return 'files'
-
-          def probe_rpf(rpf):
-              tmp = Path(tempfile.mkdtemp(prefix='probe_'))
-              ex = ROOT / 'RPFBuilder' / 'extract_rpf.py'
-              log(f'[DETECT] Opening {rpf.name} to see what is inside...')
-              subprocess.run([sys.executable, str(ex), str(rpf), str(tmp / 'x')],
-                             cwd=str(ex.parent), input='A\n', text=True)
-              inner = listing(tmp)
-              log(f'[DETECT] {len(inner)} files inside the RPF')
-              return inner
-
-          def clean(d):
-              shutil.rmtree(d, ignore_errors=True)
-              Path(d).mkdir(parents=True, exist_ok=True)
-
-          
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ps4-result
+          path: out
+          if-no-files-found: warn
