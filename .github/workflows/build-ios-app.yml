@@ -1,0 +1,47 @@
+name: Build PS4 Tools Mobile
+
+on:
+  push:
+    branches: [feature/ps4tools-ios-app]
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PS4ToolsMobile.xcodeproj \
+            -scheme PS4ToolsMobile \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee ../ios-build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps4-tools-mobile-build-log
+          path: ios-build.log
+          if-no-files-found: warn
