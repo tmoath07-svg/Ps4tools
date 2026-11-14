@@ -2,7 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @AppStorage("github_pat") private var token = ""
+    @State private var token = ""
     @State private var username = ""
     @State private var repoName = "ps4-mod-workspace"
     @State private var repository = ""
@@ -44,7 +44,7 @@ struct ContentView: View {
                                     .disabled(token.isEmpty || busy)
                                 if !username.isEmpty { Text("@\(username)").foregroundStyle(.green) }
                             }
-                            Text("استخدم Token بصلاحيات Contents وActions وAdministration لإنشاء المستودعات وتشغيل Workflow.")
+                            Text("استخدم Fine-grained Token مع صلاحيات إدارة مستودع القالب، Contents، وActions. يحفظ الرمز في Keychain بعد التحقق.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -106,6 +106,7 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("PS4 TOOLS MOBILE")
+            .onAppear { token = TokenVault.load() }
             .sheet(isPresented: $showingGuide) { GuideView() }
             .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
                 switch result {
@@ -132,7 +133,8 @@ struct ContentView: View {
     @MainActor private func verifyAccount() async {
         await perform {
             username = try await client().verify()
-            status = "تم ربط GitHub بنجاح."
+            TokenVault.save(token)
+            status = "تم ربط GitHub بنجاح وحفظ الرمز في Keychain."
         }
     }
 
