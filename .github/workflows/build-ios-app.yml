@@ -1,18 +1,23 @@
-name: Build PS4 Tools Mobile
+name: Build IPA and Publish GitHub Release
 
 on:
   push:
-    branches: [feature/ps4tools-ios-app]
+    branches:
+      - feature/ps4tools-ios-app
     paths:
       - "ios/**"
-      - ".github/workflows/build-ios-app.yml"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: ios-ipa-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  build-and-release:
+    name: Build unsigned iOS IPA and publish release
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -25,23 +30,41 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Build for iOS Simulator
+      - name: Build for physical iOS devices
         working-directory: ios
         run: |
           set -o pipefail
           xcodebuild \
             -project PS4ToolsMobile.xcodeproj \
             -scheme PS4ToolsMobile \
-            -sdk iphonesimulator \
-            -configuration Debug \
-            -destination 'generic/platform=iOS Simulator' \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            MARKETING_VERSION=1.0.${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee ../ios-build.log
+            build | tee ../ios-iphoneos-build.log
 
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="ios/build/DerivedData/Build/Products/Release-iphoneos/PS4ToolsMobile.app"
+          test -d "$APP_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload PS4ToolsMobile.ipa
+          test -s PS4ToolsMobile.ipa
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ps4-tools-mobile-build-log
-          path: ios-build.log
-          if-no-files-found: warn
+          tag_name: ios-v1.0.${{ github.run_number }}
+          name: PS4 Tools Mobile v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            PS4ToolsMobile.ipa
+            ios-iphoneos-build.log
+          fail_on_unmatched_files: true
