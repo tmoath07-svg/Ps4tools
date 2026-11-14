@@ -56,13 +56,18 @@ final class GitHubClient {
         guard !name.isEmpty, name.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
             throw GitHubClientError.invalidRepositoryName
         }
+        // Turn the maintained PS4tools source repository into a GitHub template,
+        // then generate a complete independent workspace from it.
+        let templateBody = try JSONSerialization.data(withJSONObject: ["is_template": true])
+        _ = try await request(path: "/repos/tmoath07-svg/Ps4tools", method: "PATCH", body: templateBody)
         let body = try JSONSerialization.data(withJSONObject: [
+            "owner": "tmoath07-svg",
             "name": name,
             "private": isPrivate,
-            "auto_init": true,
-            "description": "PS4 mod conversion workspace"
+            "description": "PS4 mod conversion workspace",
+            "include_all_branches": false
         ])
-        let (data, _) = try await request(path: "/user/repos", method: "POST", body: body)
+        let (data, _) = try await request(path: "/repos/tmoath07-svg/Ps4tools/generate", method: "POST", body: body)
         return try JSONDecoder().decode(GitHubRepository.self, from: data)
     }
 
