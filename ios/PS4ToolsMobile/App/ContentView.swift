@@ -151,7 +151,7 @@ struct ContentView: View {
             guard !repository.isEmpty else { return }
             for (index, file) in selectedFiles.enumerated() {
                 status = "رفع الملف \(index + 1) من \(selectedFiles.count): \(file.lastPathComponent)"
-                let destination = "input/\(file.lastPathComponent)"
+                let destination = String(format: "input/file-%03d-%@", index + 1, file.lastPathComponent)
                 try await client().upload(fileURL: file, repository: repository, destination: destination)
             }
             status = "اكتمل رفع الملفات. تقدر تشغل التحويل."
